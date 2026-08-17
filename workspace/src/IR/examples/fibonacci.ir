@@ -1,0 +1,21 @@
+-- Recursive Fibonacci.
+--
+-- fib(0) = 0
+-- fib(1) = 1
+-- fib(n) = fib(n-1) + fib(n-2)
+
+func fib(n) {
+  SEQ(CJUMP(BINOP(LEQ, TEMP(n), CONST(1)), base, rec),
+  SEQ(LABEL(base),
+  SEQ(RETURN(TEMP(n)),
+  SEQ(LABEL(rec),
+  SEQ(MOVE(TEMP(a), CALL(NAME(fib), BINOP(SUB, TEMP(n), CONST(1)))),
+  SEQ(MOVE(TEMP(b), CALL(NAME(fib), BINOP(SUB, TEMP(n), CONST(2)))),
+      RETURN(BINOP(ADD, TEMP(a), TEMP(b)))))))))
+}
+
+-- Entry point: compute fib(10) and print it.
+func main() {
+  SEQ(MOVE(TEMP(result), CALL(NAME(fib), CONST(10))),
+      EXP(CALL(NAME(print), TEMP(result))))
+}

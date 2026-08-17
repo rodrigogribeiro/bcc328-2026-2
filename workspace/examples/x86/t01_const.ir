@@ -1,0 +1,4 @@
+func main() {
+  SEQ(EXP(CALL(NAME(print), CONST(42))),
+      RETURN())
+}

@@ -1,0 +1,7 @@
+func add(a, b) {
+  RETURN(BINOP(ADD, TEMP(a), TEMP(b)))
+}
+func main() {
+  SEQ(EXP(CALL(NAME(print), CALL(NAME(add), CONST(3), CONST(4)))),
+      RETURN())
+}

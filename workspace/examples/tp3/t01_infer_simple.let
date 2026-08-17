@@ -1,0 +1,18 @@
+-- Inferência de tipos simples: sem nenhuma anotação
+let square = fn (n) {
+    return n * n;
+}
+
+let abs_val = fn (n) {
+    if n < 0 {
+        return -n;
+    } else {
+        return n;
+    }
+}
+
+let main = fn (args : array(string)) : unit {
+    print(int_to_string(square(7)));
+    print(int_to_string(abs_val(-5)));
+    print(int_to_string(abs_val(3)));
+}

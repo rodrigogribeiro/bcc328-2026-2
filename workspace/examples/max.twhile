@@ -1,0 +1,14 @@
+-- Calcula o máximo entre dois inteiros.
+-- Uso: cabal run twhile -- --wasm --file examples/max.twhile
+
+var a   : int  = 42;
+var b   : int  = 17;
+var res : int  = 0;
+
+if b < a {
+    res := a;
+} else {
+    res := b;
+}
+
+print res;

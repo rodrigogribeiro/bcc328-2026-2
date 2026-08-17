@@ -1,0 +1,27 @@
+func factorial(n) {
+  SEQ(CJUMP(BINOP(EQ, TEMP(n), CONST(0)), if_true_0, if_false_1),
+        SEQ(LABEL(if_true_0),
+              SEQ(RETURN(CONST(1)),
+                    SEQ(JUMP(NAME(if_end_2)),
+                          SEQ(LABEL(if_false_1),
+                                SEQ(RETURN(BINOP(MUL, TEMP(n), CALL(NAME(factorial), BINOP(SUB, TEMP(n), CONST(1))))),
+                                      LABEL(if_end_2)))))))
+}
+func factorialIter(n) {
+  SEQ(MOVE(TEMP(result), CONST(1)),
+        SEQ(MOVE(TEMP(i), TEMP(n)),
+              SEQ(LABEL(while_head_0),
+                    SEQ(CJUMP(BINOP(GT, TEMP(i), CONST(0)), while_body_1, while_exit_2),
+                          SEQ(LABEL(while_body_1),
+                                SEQ(MOVE(TEMP(result), BINOP(MUL, TEMP(result), TEMP(i))),
+                                      SEQ(MOVE(TEMP(i), BINOP(SUB, TEMP(i), CONST(1))),
+                                            SEQ(JUMP(NAME(while_head_0)),
+                                                  SEQ(LABEL(while_exit_2),
+                                                        RETURN(TEMP(result)))))))))))
+}
+func main() {
+  SEQ(MOVE(TEMP(n), CONST(0)),
+        SEQ(MOVE(TEMP(n), CALL(NAME(read_int))),
+              SEQ(EXP(CALL(NAME(print), CALL(NAME(factorial), TEMP(n)))),
+                    EXP(CALL(NAME(print), CALL(NAME(factorialIter), TEMP(n)))))))
+}

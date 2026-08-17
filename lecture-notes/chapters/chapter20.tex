@@ -1,0 +1,984 @@
+\chapter{Geração de Código WebAssembly}\label{chap:wat}
+
+\section{Introdução}
+
+Nos capítulos anteriores construímos a \emph{representação intermediária em
+árvore} (IRT) e aplicamos otimizações sobre ela.  O passo final do compilador é
+a \textbf{seleção de instruções}: traduzir a IRT para uma linguagem executável
+pela máquina-alvo.
+
+Neste capítulo a máquina-alvo é o \textbf{WebAssembly} (Wasm), uma
+especificação de máquina virtual com semântica formal publicada pelo W3C.
+WebAssembly é uma escolha excelente para fins pedagógicos: sua semântica é
+precisa, sua representação textual (WAT) é legível, e ferramentas como
+\texttt{wabt} e \texttt{wasmtime} permitem validar e executar o código gerado
+diretamente a partir da linha de comando.
+
+\begin{center}
+  \begin{tikzpicture}[
+      node distance=1.2cm and 1.5cm,
+      box/.style={draw, rounded corners, minimum width=2.8cm, minimum
+      height=0.9cm, font=\small\sffamily, align=center},
+      arr/.style={-Stealth, thick}
+    ]
+    \node[box] (irt)  {IRT};
+    \node[box, right=of irt]  (opt)   {IRT otimizada};
+    \node[box, right=of opt]  (wat)   {Módulo WAT};
+    \node[box, right=of wat]  (wasm)  {Binário Wasm};
+    \draw[arr] (irt) -- (opt) node[midway, above, font=\tiny\sffamily]{opt.};
+    \draw[arr] (opt) -- (wat) node[midway, above, font=\tiny\sffamily]{codegen};
+    \draw[arr] (wat) -- (wasm) node[midway, above,
+    font=\tiny\sffamily]{\texttt{wat2wasm}};
+  \end{tikzpicture}
+\end{center}
+
+O gerador descrito neste capítulo recebe um programa IRT (possivelmente
+otimizado) e produz um módulo WAT que pode ser montado com \texttt{wat2wasm} e
+executado com \texttt{wasmtime}.
+
+% ============================================================================
+\section{O Formato Textual WebAssembly (WAT)}\label{sec:wat-syntax}
+% ============================================================================
+
+\subsection{Visão Geral}
+
+Um \textbf{módulo} WAT é um arquivo de texto estruturado em S-expressões.  Cada
+módulo agrupa declarações de importações, memória, variáveis globais, funções e
+exportações.  A figura a seguir mostra a estrutura geral:
+
+\begin{minted}{text}
+(module
+  (import "wasi_snapshot_preview1" "fd_write"
+          (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_read"
+          (func $fd_read  (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 4)
+  (global $heap_ptr (mut i32) (i32.const 128))
+  (func $alloc  ...)
+  (func $main   ...)   ;; funções do usuário
+  (func $print  ...)   ;; runtime I/O embutido
+  (func $read_int ...)
+  (export "main"   (func $main))
+  (export "_start" (func $main))
+)
+\end{minted}
+
+\subsection{Tipos e Valores}
+
+O subconjunto de WebAssembly utilizado neste compilador usa apenas o tipo
+$\mathtt{i32}$ (inteiro de 32 bits com e sem sinal, dependendo da instrução).
+Todos os valores da IRT, incluindo inteiros, ponteiros de memória e endereços de
+registradores temporários, são representados como $\mathtt{i32}$.
+
+\subsection{Gramática do Subconjunto WAT}\label{subsec:wat-grammar}
+
+A figura~\ref{fig:wat-grammar} apresenta a gramática do subconjunto de WAT
+gerado pelo compilador.
+
+\begin{figure}[htbp]
+  \[
+    \begin{array}{lcll}
+      \mathit{mod}  &::=&
+      \mathtt{(module}\ \vec{\mathit{import}}\ \mathit{mem}?\ \vec{\mathit{global}}\ \vec{\mathit{func}}\ \vec{\mathit{export}}\mathtt{)}
+      \\[4pt]
+      \mathit{import} &::=&
+      \mathtt{(import}\ s_1\ s_2\ \mathtt{(func}\ \$f\ \mathit{ftype}\mathtt{))}
+      \\
+      \mathit{mem}   &::=& \mathtt{(memory}\ n\mathtt{)} \\
+      \mathit{global} &::=&
+      \mathtt{(global}\ \$g\ \mathtt{(mut\ i32)}\ \mathtt{(i32.const}\ n\mathtt{))}
+      \\
+      \mathit{func}  &::=&
+      \mathtt{(func}\ \$f\ \vec{\mathit{param}}\ \mathit{result}?\ \vec{\mathit{local}}\ \vec{i}\mathtt{)}
+      \\
+      \mathit{param} &::=& \mathtt{(param}\ \$x\ \mathtt{i32)} \\
+      \mathit{local} &::=& \mathtt{(local}\ \$x\ \mathtt{i32)} \\
+      \mathit{result} &::=& \mathtt{(result\ i32)} \\
+      \mathit{export} &::=&
+      \mathtt{(export}\ s\ \mathtt{(func}\ \$f\mathtt{))} \\[4pt]
+      i &::=& \mathtt{i32.const}\ n \\
+      &\mid& \mathtt{local.get}\ \$x \mid \mathtt{local.set}\ \$x
+      \mid \mathtt{local.tee}\ \$x \\
+      &\mid& \mathtt{global.get}\ \$g \mid \mathtt{global.set}\ \$g \\
+      &\mid& \mathit{binop} \\
+      &\mid& \mathtt{i32.eqz} \mid \mathtt{i32.load} \mid \mathtt{i32.store} \\
+      &\mid& \mathtt{drop} \mid \mathtt{return} \mid \mathtt{unreachable} \\
+      &\mid& \mathtt{call}\ \$f \\
+      &\mid& \mathtt{(block}\ \$\ell\ \vec{i}\mathtt{)} \\
+      &\mid& \mathtt{(loop}\ \$\ell\ \vec{i}\mathtt{)} \\
+      &\mid&
+      \mathtt{(if}\ \mathtt{(then}\ \vec{i}\mathtt{)}\ (\mathtt{(else}\ \vec{i}\mathtt{)})?\ \mathtt{)}
+      \\
+      &\mid& \mathtt{br}\ \$\ell \mid \mathtt{br\_if}\ \$\ell \\[4pt]
+      \mathit{binop} &::=& \mathtt{i32.add} \mid \mathtt{i32.sub}
+      \mid \mathtt{i32.mul}
+      \mid \mathtt{i32.div\_s} \mid \mathtt{i32.rem\_s} \\
+      &\mid& \mathtt{i32.and} \mid \mathtt{i32.or} \mid \mathtt{i32.xor} \\
+      &\mid& \mathtt{i32.shl} \mid \mathtt{i32.shr\_s} \mid
+      \mathtt{i32.shr\_u} \\
+      &\mid& \mathtt{i32.eq} \mid \mathtt{i32.ne}
+      \mid \mathtt{i32.lt\_s} \mid \mathtt{i32.le\_s}
+      \mid \mathtt{i32.gt\_s} \mid \mathtt{i32.ge\_s}
+    \end{array}
+  \]
+  \caption{Gramática do subconjunto WAT gerado pelo
+  compilador.}\label{fig:wat-grammar}
+\end{figure}
+
+% ============================================================================
+\section{Semântica Operacional}\label{sec:wat-semantics}
+% ============================================================================
+
+A semântica de WebAssembly é definida sobre uma \textbf{pilha de operandos}.
+Instruções consomem valores do topo da pilha e empilham resultados.  O estado
+de execução de uma função é um par $(\sigma, \mu)$ onde:
+
+\begin{itemize}
+  \item $\sigma = [v_1, \ldots, v_n]$ é a \textbf{pilha de operandos}
+    (o topo é à direita);
+  \item $\mu$ é o \textbf{ambiente de variáveis locais} (incluindo parâmetros),
+    mapeando nomes a valores $\mathtt{i32}$.
+\end{itemize}
+
+A memória linear $\mathbf{M}$ e os globais $\mathbf{G}$ são compartilhados por
+todas as funções em execução e são tratados como estado global.
+
+\subsection{Regras de Avaliação de Instruções}
+
+Usamos a notação $(\sigma, \mu) \xrightarrow{i} (\sigma', \mu')$ para
+``a instrução $i$ transforma o estado $(\sigma, \mu)$ em $(\sigma', \mu')$''.
+
+\begin{Definition}[Semântica das Instruções Básicas]\label{def:wat-instrs}
+  \[
+    \dfrac{}
+    {(\sigma, \mu) \xrightarrow{\mathtt{i32.const}\ n} (\sigma \cdot n,\ \mu)}
+    \quad
+    \dfrac{\mu(\$x) = v}
+    {(\sigma, \mu) \xrightarrow{\mathtt{local.get}\ \$x} (\sigma \cdot v,\ \mu)}
+  \]
+
+  \[
+    \dfrac{\sigma = \sigma' \cdot v}
+    {(\sigma, \mu) \xrightarrow{\mathtt{local.set}\ \$x}
+    (\sigma',\ \mu[\$x \mapsto v])}
+    \quad
+    \dfrac{\sigma = \sigma' \cdot v \cdot v}
+    {(\sigma, \mu) \xrightarrow{\mathtt{local.tee}\ \$x} (\sigma'
+    \cdot v,\ \mu[\$x \mapsto v])}
+  \]
+
+  \[
+    \dfrac{\sigma = \sigma' \cdot v_2 \cdot v_1 \quad v =
+    \mathit{eval}(\mathit{op}, v_1, v_2)}
+    {(\sigma, \mu) \xrightarrow{\mathit{binop}} (\sigma' \cdot v,\ \mu)}
+  \]
+
+  \[
+    \dfrac{\sigma = \sigma' \cdot a \quad \mathbf{M}[a] = v}
+    {(\sigma, \mu) \xrightarrow{\mathtt{i32.load}} (\sigma' \cdot v,\ \mu)}
+    \quad
+    \dfrac{\sigma = \sigma'' \cdot a \cdot v}
+    {(\sigma, \mu) \xrightarrow{\mathtt{i32.store}} (\sigma'',\ \mu)
+    \quad \mathbf{M}[a] \leftarrow v}
+  \]
+
+  \[
+    \dfrac{\sigma = \sigma' \cdot v}
+    {(\sigma, \mu) \xrightarrow{\mathtt{drop}} (\sigma',\ \mu)}
+  \]
+\end{Definition}
+
+As instruções de empilhamento de valores são as mais simples.
+A instrução $\mathtt{i32.const}\ n$ não consome nenhum operando: ela apenas
+estende a pilha com a constante $n$, sendo usada para introduzir literais
+numéricos e correspondendo à expressão $\mathbf{CONST}(n)$ da IRT\@.
+A instrução $\mathtt{local.get}\ \$x$ lê o valor atual da variável $\$x$ no
+ambiente $\mu$ e o empilha, sem alterar $\mu$; implementa
+$\mathbf{TEMP}(t)$.
+
+As instruções de escrita em variáveis locais vêm em duas formas:
+$\mathtt{local.set}\ \$x$ desempilha o topo $v$ e atualiza o ambiente,
+produzindo $\mu[\$x \mapsto v]$; é gerada para
+$\mathbf{MOVE}(\mathbf{TEMP}\ t, e)$.
+$\mathtt{local.tee}\ \$x$ faz o mesmo, mas mantém $v$ no topo da pilha,
+permitindo armazenar um temporário e reutilizá-lo imediatamente como operando,
+útil em expressões $\mathbf{ESEQ}$ que precisam materializar um valor e ao
+mesmo tempo retorná-lo.
+
+As instruções aritméticas e de comparação são representadas coletivamente por
+$\mathit{binop}$. Elas desempilham os dois operandos do topo ($v_1$ acima,
+$v_2$ abaixo), aplicam $\mathit{eval}(\mathit{op}, v_1, v_2)$ e empilham o
+resultado. Na tradução de $\mathbf{BINOP}(\mathit{op}, e_1, e_2)$, $e_1$ é
+compilado primeiro e $e_2$ depois, de modo que $e_2$ fica ao topo quando a
+instrução é executada; a Tabela~\ref{tab:binop} mostra o mapeamento completo
+de operadores IRT para instruções WAT.
+
+O acesso à memória linear é feito por $\mathtt{i32.load}$ e
+$\mathtt{i32.store}$. A primeira desempilha o endereço $a$ e empilha o valor
+de 32 bits armazenado em $\mathbf{M}[a]$, implementando $\mathbf{MEM}(e)$.
+A segunda desempilha $v$ (topo) e $a$ (logo abaixo) e escreve $v$ em
+$\mathbf{M}[a]$ sem deixar nenhum resultado na pilha; implementa
+$\mathbf{MOVE}(\mathbf{MEM}(a), e)$.
+
+Por fim, $\mathtt{drop}$ descarta o topo da pilha sem utilizá-lo. Ela é
+necessária quando uma chamada de função retorna um valor que deve ser
+ignorado, como ocorre ao traduzir $\mathbf{EXP}(\mathbf{CALL}(f, \vec{e}))$
+para uma função $f$ com tipo de retorno: sem $\mathtt{drop}$, o verificador
+de tipos WAT rejeitaria a função por encontrar um valor extra na pilha ao
+fim do bloco.
+
+\subsection{Controle de Fluxo Estruturado}
+
+WebAssembly usa controle de fluxo \textbf{estruturado}: não há \texttt{goto}
+incondicional.  Os construtores são:
+
+\begin{itemize}
+  \item \texttt{block $\ell$ \{ $\vec{i}$ \}}: executa $\vec{i}$; um
+    \texttt{br $\ell$} dentro salta para o fim do bloco (\emph{break}).
+  \item \texttt{loop $\ell$ \{ $\vec{i}$ \}}: executa $\vec{i}$; um
+    \texttt{br $\ell$} dentro salta para o \emph{início} do laço
+    (\emph{continue}).
+  \item \texttt{if \{ $\vec{i}_t$ \} else \{ $\vec{i}_f$ \}}: consome o topo
+    da pilha; executa o ramo verdadeiro se $\neq 0$, o falso caso contrário.
+  \item \texttt{br\_if $\ell$}: consome o topo da pilha; ramifica se $\neq 0$.
+\end{itemize}
+
+O padrão canônico de laço \texttt{while} em WAT combina \texttt{block} e
+\texttt{loop}:
+
+\begin{minted}{text}
+(block $exit
+  (loop $head
+    ;; condição de saída: se deve sair, br_if $exit
+    <condição>
+    br_if $exit
+    ;; corpo do laço
+    <corpo>
+    br $head   ;; volta ao início
+  )
+)
+\end{minted}
+
+% ============================================================================
+\section{Tradução da IRT para WAT}\label{sec:irt-to-wat}
+% ============================================================================
+
+\subsection{Estrutura Geral do Módulo}
+
+Dado um programa IRT $P = [f_1, \ldots, f_n]$, o módulo WAT gerado é
+\emph{auto-contido}: não depende de nenhum módulo externo em tempo de execução.
+
+\[
+  \mathtt{(module}\ \mathit{WasiImports}\ \mathtt{(memory\ 4)}\ \mathtt{(global\ \$heap\_ptr\ \ldots)}\ \mathit{alloc}\ \llbracket
+    f_1 \rrbracket \cdots \llbracket f_n
+  \rrbracket\ \mathit{print}\ \mathit{read\_int}\ \mathit{Exports}\mathtt{)}
+\]
+
+onde:
+\begin{itemize}
+  \item $\mathit{WasiImports}$ importa diretamente as chamadas de sistema WASI
+    \texttt{fd\_write} e \texttt{fd\_read};
+  \item \texttt{(memory (export "memory") 4)} reserva 4 páginas (256\,KB) de
+    memória linear e a exporta (exigido pela interface WASI);
+  \item \texttt{\$heap\_ptr} é um global mutável inicializado em \textbf{128};
+    os endereços 0–127 são reservados para os buffers de I/O do runtime;
+  \item $\mathit{alloc}$ é a função auxiliar de alocação de registros;
+  \item $\llbracket f \rrbracket$ é a função compilada de cada definição IRT;
+  \item $\mathit{print}$ e $\mathit{read\_int}$ são as funções de I/O do
+    runtime, embutidas diretamente no módulo gerado;
+  \item $\mathit{Exports}$ inclui \texttt{"main"} e \texttt{"\_start"} (ponto
+    de entrada WASI), ambos apontando para \texttt{\$main}.
+\end{itemize}
+
+\paragraph{Layout de memória.} O módulo compartilha uma única memória linear
+entre o runtime e o programa do usuário:
+
+\begin{center}
+  \begin{tabular}{cl}
+    \hline
+    \textbf{Endereços} & \textbf{Uso} \\
+    \hline
+    0–15   & estrutura iovec usada por \texttt{fd\_write}/\texttt{fd\_read} \\
+    16–31  & slot de retorno \texttt{nwritten}/\texttt{nread} \\
+    32–63  & buffer de entrada (stdin, 31 bytes úteis + terminador) \\
+    64–95  & buffer de saída (stdout) \\
+    96–127 & reservado \\
+    128+   & heap do programa (\texttt{\$heap\_ptr} inicia aqui) \\
+    \hline
+  \end{tabular}
+\end{center}
+
+As funções WASI \texttt{fd\_write} e \texttt{fd\_read} não retornam o número
+de bytes transferidos como valor de função: elas escrevem esse número em um
+endereço de memória fornecido pelo chamador como quarto argumento.
+\texttt{nwritten} é a palavra de 32 bits escrita por \texttt{fd\_write} após
+uma operação de escrita bem-sucedida, indicando quantos bytes foram
+efetivamente enviados para o descritor de arquivo (no caso do runtime,
+sempre o stdout).  De forma análoga, \texttt{nread} é a palavra escrita por
+\texttt{fd\_read} indicando quantos bytes foram lidos do stdin.  O runtime
+reserva os endereços 16–31 como slot fixo para receber esses valores; após
+a chamada WASI, o runtime pode ler a palavra em 16 para confirmar que a
+operação foi concluída, embora na prática o valor seja ignorado.
+
+\subsection{Alocador de Memória}\label{subsec:alloc}
+
+O alocador usa a estratégia \emph{bump-pointer}: um ponteiro global
+\texttt{\$heap\_ptr} avança a cada alocação.  A função \texttt{alloc(n)}
+aloca $n$ palavras de 8 bytes cada e retorna o endereço base:
+
+\[
+  \mathit{alloc}(n) \equiv
+  \begin{array}[t]{l}
+    \mathbf{base} \leftarrow \mathtt{heap\_ptr} \\
+    \mathtt{heap\_ptr} \leftarrow \mathtt{heap\_ptr} + n \times 8 \\
+    \mathbf{return}\ \mathbf{base}
+  \end{array}
+\]
+
+Em WAT:
+
+\begin{minted}{text}
+(func $alloc (param $n i32) (result i32)
+  (local $base i32)
+  global.get $heap_ptr
+  local.set $base
+  global.get $heap_ptr
+  local.get $n
+  i32.const 8
+  i32.mul
+  i32.add
+  global.set $heap_ptr
+  local.get $base
+)
+\end{minted}
+
+A principal vantagem do alocador bump-pointer é sua extrema simplicidade: uma
+alocação resume-se a ler o ponteiro atual, somá-lo ao tamanho pedido e
+armazenar o novo valor, o que corresponde a um número fixo e pequeno de
+instruções independentemente do tamanho do bloco alocado.  Não há metadados
+por bloco, listas de blocos livres ou fragmentação de endereços: o heap é um
+intervalo contíguo e crescente.  Essa característica é adequada para um
+compilador didático cujos programas alocam objetos durante a execução e
+encerram em seguida: como a memória WebAssembly é liberada automaticamente
+quando o módulo é destruído, a ausência de um mecanismo de liberação
+individual não representa um problema prático.
+
+\subsection{Tradução de Definições de Funções}
+
+Seja $f = \mathtt{func}\ \mathit{name}(\vec{p})\ s$ uma definição IRT.  A
+função WAT correspondente é:
+
+\[
+  \llbracket f \rrbracket =
+  \mathtt{(func}\ \$\mathit{name}\ \vec{\mathtt{(param}\ \$p_i\ \mathtt{i32)}}\ r\
+    \vec{\mathtt{(local}\ \$t_j\ \mathtt{i32)}}\ \llbracket s
+    \rrbracket_{\text{seq}}\
+  [\ \mathtt{unreachable}\ ]^{r \neq \varepsilon}\ \mathtt{)}
+\]
+
+onde $r = \mathtt{(result\ i32)}$ se o corpo contém algum \texttt{RETURN} com
+valor, $r = \varepsilon$ caso contrário, e os $t_j$ são os temporários do corpo
+que não são parâmetros.  A instrução \texttt{unreachable} final é necessária
+para satisfazer o verificador de tipos WAT quando a função retorna via
+\texttt{return} explícito em todos os caminhos de controle.
+
+\subsection{Linearização e Reconstrução de Fluxo de Controle}
+
+A IRT representa sequências com o construtor binário $\mathbf{SEQ}$.  O
+primeiro passo da compilação é \textbf{linearizar} o corpo em uma lista plana
+de instruções $[s_0, s_1, \ldots, s_{n-1}]$ e construir um \textbf{mapa de
+rótulos} $\mathcal{L} : \mathit{Label} \to \mathbb{N}$ mapeando cada rótulo ao
+índice em que ele aparece.
+
+\paragraph{Reconhecimento de while.}
+Um laço \texttt{while} aparece na sequência linearizada na forma:
+
+\[
+  \underbrace{\mathbf{LABEL}\ \ell_h}_{i},\quad
+  \underbrace{\mathbf{CJUMP}(e, \ell_a, \ell_b)}_{i+1},\quad
+  \underbrace{\text{corpo}}_{\ldots},\quad
+  \underbrace{\mathbf{JUMP}(\mathbf{NAME}\ \ell_h)}_{\text{antes de exit}},\quad
+  \underbrace{\mathbf{LABEL}\ \ell_{\mathit{exit}}}_{\ldots}
+\]
+
+Há duas convenções, dependendo de como o \emph{front-end} gera o \textbf{CJUMP}:
+
+\begin{description}
+  \item[Convenção A (TWhile/TImp).] $\ell_a = \ell_{\mathit{body}}$ está
+    imediatamente após o CJUMP; $\ell_b = \ell_{\mathit{exit}}$.  A condição
+    $e$ é verdadeira quando o laço deve \emph{continuar}.  Geração WAT:
+    \[
+      \llbracket e \rrbracket \cdot [\mathtt{i32.eqz}] \cdot
+      [\mathtt{br\_if}\ \ell_{\mathit{exit}}]
+    \]
+  \item[Convenção B (estilo factorial).] $\ell_b = \ell_{\mathit{body}}$ está
+    imediatamente após o CJUMP; $\ell_a = \ell_{\mathit{exit}}$.  A condição
+    $e$ é verdadeira quando o laço deve \emph{parar}.  Geração WAT:
+    \[
+      \llbracket e \rrbracket \cdot [\mathtt{br\_if}\ \ell_{\mathit{exit}}]
+    \]
+\end{description}
+
+Em ambos os casos o código WAT gerado tem a forma:
+
+\begin{minted}{text}
+(block $exit
+  (loop $head
+    <check>          ;; br_if $exit (com ou sem i32.eqz)
+    <corpo>
+    br $head
+  )
+)
+\end{minted}
+
+\paragraph{Reconhecimento de if/if-else.}
+Um condicional aparece na forma:
+
+\[
+  \underbrace{\mathbf{CJUMP}(e, \ell_t, \ell_f)}_{i},\quad
+  \underbrace{\mathbf{LABEL}\ \ell_t}_{i+1},\quad
+  \text{ramo then},\quad
+  \underbrace{\mathbf{LABEL}\ \ell_f}_{\ldots}
+\]
+
+Para o if-else, o ramo then termina com $\mathbf{JUMP}(\mathbf{NAME}\ \ell_e)$
+onde $\ell_e$ é o rótulo de saída após o bloco else.  O código gerado é:
+
+\[
+  \llbracket e \rrbracket \cdot
+  [\mathtt{if}\ (\mathtt{then}\ \llbracket\text{then}\rrbracket)\ (\mathtt{else}\ \llbracket\text{else}\rrbracket)]
+\]
+
+\subsection{Regras de Tradução de Comandos}\label{subsec:trans-stmts}
+
+As regras $\mathcal{S}\llbracket \cdot \rrbracket$ traduzem comandos IRT não
+relacionados ao fluxo de controle (esses são tratados pela reconstrução acima).
+
+\begin{Definition}[Tradução de Comandos]\label{def:trans-stmts}
+  \begin{align*}
+    \mathcal{S}\llbracket \mathbf{MOVE}(\mathbf{TEMP}\ t, e) \rrbracket
+    &= \mathcal{E}\llbracket e \rrbracket \cdot [\mathtt{local.set}\ \$t] \\
+    \mathcal{S}\llbracket \mathbf{MOVE}(\mathbf{MEM}(a), e) \rrbracket
+    &= \mathcal{E}\llbracket a \rrbracket \cdot \mathcal{E}\llbracket
+    e \rrbracket \cdot [\mathtt{i32.store}] \\
+    \mathcal{S}\llbracket
+    \mathbf{EXP}(\mathbf{CALL}(\mathbf{NAME}\ f, \vec{e})) \rrbracket
+    &= \mathcal{E}\llbracket \vec{e} \rrbracket \cdot
+    [\mathtt{call}\ \$f] \cdot d_f \\
+    \mathcal{S}\llbracket \mathbf{RETURN}([\ ]) \rrbracket
+    &= [\mathtt{return}] \\
+    \mathcal{S}\llbracket \mathbf{RETURN}([e]) \rrbracket
+    &= \mathcal{E}\llbracket e \rrbracket \cdot [\mathtt{return}]
+  \end{align*}
+  onde $d_f = [\mathtt{drop}]$ se $f$ retorna um valor, $d_f = [\ ]$
+  caso contrário.
+\end{Definition}
+
+\subsection{Regras de Tradução de Expressões}\label{subsec:trans-exprs}
+
+\begin{Definition}[Tradução de Expressões]\label{def:trans-exprs}
+  \begin{align*}
+    \mathcal{E}\llbracket \mathbf{CONST}(n) \rrbracket
+    &= [\mathtt{i32.const}\ n] \\
+    \mathcal{E}\llbracket \mathbf{TEMP}(t) \rrbracket
+    &= [\mathtt{local.get}\ \$t] \\
+    \mathcal{E}\llbracket \mathbf{BINOP}(\mathit{op}, e_1, e_2) \rrbracket
+    &= \mathcal{E}\llbracket e_1 \rrbracket \cdot
+    \mathcal{E}\llbracket e_2 \rrbracket \cdot [\mathit{op}_{\mathtt{i32}}] \\
+    \mathcal{E}\llbracket \mathbf{MEM}(e) \rrbracket
+    &= \mathcal{E}\llbracket e \rrbracket \cdot [\mathtt{i32.load}] \\
+    \mathcal{E}\llbracket \mathbf{CALL}(\mathbf{NAME}\ f, \vec{e}) \rrbracket
+    &= \mathcal{E}\llbracket \vec{e} \rrbracket \cdot [\mathtt{call}\ \$f] \\
+    \mathcal{E}\llbracket \mathbf{ESEQ}(s, e) \rrbracket
+    &= \mathcal{S}_0\llbracket s \rrbracket \cdot
+    \mathcal{E}\llbracket e \rrbracket
+  \end{align*}
+  onde $\mathcal{S}_0\llbracket \cdot \rrbracket$ é a tradução de comandos
+  dentro de um ESEQ, que produz efeito nulo na pilha, e
+  $\mathcal{E}\llbracket \vec{e} \rrbracket = \mathcal{E}\llbracket
+  e_1 \rrbracket \cdots \mathcal{E}\llbracket e_n \rrbracket$.
+\end{Definition}
+
+A tabela~\ref{tab:binop} mostra a correspondência entre operadores IRT e
+instruções WAT.
+
+\begin{table}[htbp]
+  \centering
+  \begin{tabular}{ll|ll|ll}
+    \hline
+    \textbf{IRT} & \textbf{WAT} & \textbf{IRT} & \textbf{WAT} &
+    \textbf{IRT} & \textbf{WAT} \\
+    \hline
+    $+$  & \texttt{i32.add}   & \&  & \texttt{i32.and}   & $=$  &
+    \texttt{i32.eq}   \\
+    $-$  & \texttt{i32.sub}   & $|$ & \texttt{i32.or}    & $\neq$ &
+    \texttt{i32.ne} \\
+    $*$  & \texttt{i32.mul}   & $\oplus$ & \texttt{i32.xor} & $<$ &
+    \texttt{i32.lt\_s} \\
+    $/s$ & \texttt{i32.div\_s}& $\ll$ & \texttt{i32.shl} & $\leq$ &
+    \texttt{i32.le\_s} \\
+    $\%s$& \texttt{i32.rem\_s}& $\gg_u$ & \texttt{i32.shr\_u} & $>$ &
+    \texttt{i32.gt\_s} \\
+    &                    & $\gg_s$ & \texttt{i32.shr\_s} & $\geq$ &
+    \texttt{i32.ge\_s} \\
+    \hline
+  \end{tabular}
+  \caption{Mapeamento de operadores IRT para instruções WAT.}\label{tab:binop}
+\end{table}
+
+% ============================================================================
+\section{Implementação em Haskell}\label{sec:wat-haskell}
+% ============================================================================
+
+A implementação está organizada em três módulos Haskell dentro do pacote
+\texttt{bcc328}:
+
+\begin{center}
+  \begin{tabular}{ll}
+    \hline
+    \textbf{Módulo} & \textbf{Responsabilidade} \\
+    \hline
+    \texttt{IR.Backend.WAT.WATSyntax} & Tipos de dados para AST WAT \\
+    \texttt{IR.Backend.WAT.WATPretty} & Impressão de módulos WAT como texto \\
+    \texttt{IR.Backend.WAT.IRToWAT}   & Tradução IRT $\to$ WAT \\
+    \hline
+  \end{tabular}
+\end{center}
+
+\subsection{WATSyntax: Tipos de Dados}
+
+O módulo \texttt{WATSyntax} define a representação interna de um módulo WAT.
+Os tipos básicos de identificadores e valores são:
+
+\begin{minted}{haskell}
+type WIdent = String
+data WValType = WI32 deriving (Eq, Show)
+\end{minted}
+
+\texttt{WIdent} é um sinônimo para \texttt{String} usado em todos os lugares
+onde WAT exige um nome prefixado por \texttt{\$}: parâmetros, locais,
+rótulos de bloco e nomes de função.  \texttt{WValType} representa os tipos de
+valor suportados; no subconjunto gerado pelo compilador existe apenas
+\texttt{WI32}, correspondente ao tipo \texttt{i32} de WebAssembly.
+
+O tipo central da AST é \texttt{WInstr}, que representa uma instrução WAT
+individual:
+
+\begin{minted}{haskell}
+data WInstr
+  = WI32Const  Int           -- i32.const n
+  | WLocalGet  WIdent        -- local.get $x
+  | WLocalSet  WIdent        -- local.set $x
+  | WI32BinOp  WBinOp        -- i32.<op>
+  | WI32Eqz                  -- i32.eqz
+  | WI32Load                 -- i32.load
+  | WI32Store                -- i32.store
+  | WDrop | WReturn | WUnreachable
+  | WBlock (Maybe WIdent) [WInstr]
+  | WLoop  (Maybe WIdent) [WInstr]
+  | WIf    [WInstr] (Maybe [WInstr])
+  | WBr WIdent | WBrIf WIdent
+  | WCall WIdent
+  | WGlobalGet WIdent | WGlobalSet WIdent
+  deriving (Eq, Show)
+\end{minted}
+
+Os construtores de \texttt{WInstr} cobrem três grupos de instruções.
+O primeiro grupo lida com valores na pilha: \texttt{WI32Const} empilha um
+literal inteiro; \texttt{WLocalGet} e \texttt{WLocalSet} leem e escrevem
+variáveis locais; \texttt{WI32BinOp} aplica uma operação aritmética ou de
+comparação sobre os dois valores do topo; \texttt{WI32Eqz} testa se o topo é
+zero; \texttt{WI32Load} e \texttt{WI32Store} acessam a memória linear;
+\texttt{WGlobalGet} e \texttt{WGlobalSet} leem e escrevem globais mutáveis
+(usados exclusivamente para \texttt{\$heap\_ptr}); e \texttt{WDrop} descarta
+o topo sem utilizá-lo.
+O segundo grupo controla o fluxo de execução: \texttt{WBlock} e \texttt{WLoop}
+introduzem blocos estruturados com rótulo opcional: o primeiro serve de alvo
+para \emph{break} e o segundo para \emph{continue}; \texttt{WIf} encapsula os
+ramos então e, opcionalmente, senão; \texttt{WBr} e \texttt{WBrIf} realizam
+desvios incondicionais e condicionais para um rótulo.
+O terceiro grupo cuida de chamadas e retornos: \texttt{WCall} invoca uma
+função pelo nome; \texttt{WReturn} retorna o topo da pilha (ou nada) ao
+chamador; e \texttt{WUnreachable} marca um ponto de controle que o verificador
+de tipos WAT considera inacessível, necessário para satisfazer a checagem de
+tipo em funções que retornam via \texttt{WReturn} em todos os caminhos.
+
+Uma função WAT é representada por \texttt{WFunc}:
+
+\begin{minted}{haskell}
+data WFunc = WFunc
+  { wfName   :: WIdent
+  , wfParams :: [WParam]
+  , wfResult :: Maybe WValType
+  , wfLocals :: [WLocal]
+  , wfBody   :: [WInstr]
+  } deriving (Eq, Show)
+\end{minted}
+
+O campo \texttt{wfName} é o identificador da função, que aparece prefixado por
+\texttt{\$} no texto WAT.  \texttt{wfParams} lista os parâmetros tipados;
+\texttt{wfResult} é \texttt{Nothing} para funções void e \texttt{Just WI32}
+para funções que retornam um valor.  \texttt{wfLocals} declara os temporários
+internos (variáveis que não são parâmetros), e \texttt{wfBody} contém a
+sequência de instruções.
+
+Por fim, \texttt{WModule} agrupa todas as declarações de um módulo WAT
+completo:
+
+\begin{minted}{haskell}
+data WModule = WModule
+  { wmImports      :: [WImport]
+  , wmMemory       :: Maybe Int
+  , wmMemoryExport :: Maybe String
+  , wmGlobals      :: [WGlobal]
+  , wmFuncs        :: [WFunc]
+  , wmExports      :: [WExport]
+  , wmRawDecls     :: [String]
+  } deriving (Eq, Show)
+\end{minted}
+
+\texttt{wmImports} contém as importações WASI (\texttt{fd\_write} e
+\texttt{fd\_read}).  \texttt{wmMemory} especifica o número de páginas de
+memória linear a reservar; \texttt{wmMemoryExport} é o nome sob o qual essa
+memória é exportada, exigido pela interface WASI\@.  \texttt{wmGlobals} declara
+as variáveis globais mutáveis, no caso apenas \texttt{\$heap\_ptr}.
+\texttt{wmFuncs} é a lista de funções compiladas a partir da IRT\@.
+\texttt{wmExports} lista os pontos de entrada exportados (\texttt{"main"} e
+\texttt{"\_start"}).  \texttt{wmRawDecls} armazena fragmentos WAT verbatim:
+as funções de runtime \texttt{\$print} e \texttt{\$read\_int}, inseridas
+diretamente no módulo sem passar pela AST \texttt{WInstr}.
+
+\subsection{WATPretty: Impressão}
+
+O módulo \texttt{WATPretty} define uma instância \texttt{Pretty WModule}
+usando a biblioteca \texttt{HughesPJ}.  A função central é \texttt{ppInstr}
+que converte cada construtor \texttt{WInstr} para o texto WAT correspondente:
+
+\begin{minted}{haskell}
+ppInstr :: WInstr -> Doc
+ppInstr (WI32Const n)        = text "i32.const" <+> int n
+ppInstr (WLocalGet  x)       = text "local.get"  <+> dollar x
+ppInstr (WLocalSet  x)       = text "local.set"  <+> dollar x
+ppInstr (WI32BinOp op)       = ppBinOp op
+ppInstr (WBlock mlbl body)   =
+  let hdr = text "block" <> maybe empty (\l -> space <> dollar l) mlbl
+  in parens (hdr $$ nest 2 (vcat (map ppInstr body)))
+ppInstr (WLoop mlbl body)    =
+  let hdr = text "loop" <> maybe empty (\l -> space <> dollar l) mlbl
+  in parens (hdr $$ nest 2 (vcat (map ppInstr body)))
+ppInstr (WIf thenB mElse)    =
+  let thenDoc = parens (text "then" $$ nest 2 (vcat (map ppInstr thenB)))
+      elseDoc = maybe empty
+                  (\eb -> parens (text "else" $$ nest 2 (vcat (map ppInstr eb))))
+                  mElse
+  in parens (text "if" $$ nest 2 (thenDoc $$ elseDoc))
+\end{minted}
+
+\subsection{IRToWAT: O Gerador de Código}
+
+O módulo \texttt{IRToWAT} é o coração do gerador.  Sua função pública é:
+
+\begin{minted}{haskell}
+irToWAT :: Program -> Either String WModule
+\end{minted}
+
+O módulo é construído com as seguintes configurações fixas:
+
+\begin{minted}{haskell}
+irToWAT prog = do
+  let retMap = buildRetMap prog
+  funcDefs <- mapM (compileFunc retMap) prog
+  return WModule
+    { wmImports      = wasiImports          -- fd_write e fd_read
+    , wmMemory       = Just 4               -- 4 páginas = 256 KB
+    , wmMemoryExport = Just "memory"        -- exigido pela WASI
+    , wmGlobals      = [heapPtrGlobal]      -- heap_ptr = 128
+    , wmFuncs        = allocFunc : funcDefs
+    , wmExports      = [ WExport "main"   "main"
+                       , WExport "_start" "main" ]
+    , wmRawDecls     = [runtimePrint, runtimeReadInt]
+    }
+\end{minted}
+
+\noindent onde \texttt{heapPtrGlobal = WGlobal "heap\_ptr" WI32 True 128} e
+\texttt{wmRawDecls} contém o WAT verbatim das funções \texttt{\$print} e
+\texttt{\$read\_int}, embutidas no módulo sem passar pelo AST \texttt{WInstr}.
+
+A compilação de cada função opera em três fases:
+
+\paragraph{Fase 1: Linearização.}
+O corpo (um \texttt{Stmt} com \texttt{SEQ}) é achatado numa lista plana
+$[s_0, \ldots, s_{n-1}]$ e convertido num array para acesso $O(1)$ por índice.
+Simultaneamente constrói-se o mapa de rótulos $\mathcal{L}$.
+
+\begin{minted}{haskell}
+linearize :: Stmt -> [Stmt]
+linearize (SEQ s1 s2) = linearize s1 ++ linearize s2
+linearize s           = [s]
+
+buildLabelMap :: [Stmt] -> LabelMap
+buildLabelMap stmts =
+  Map.fromList [(l, i) | (i, LABEL l) <- zip [0..] stmts]
+\end{minted}
+
+\paragraph{Fase 2: Coleta de temporários locais.}
+Para declarar todos os \texttt{local} necessários, percorre-se o corpo
+coletando todos os \texttt{TEMP}, removendo os parâmetros:
+
+\begin{minted}{haskell}
+collectTempsStmt :: Stmt -> Set Temp
+collectTempsExpr :: Expr -> Set Temp
+-- ... (percorre toda a AST acumulando temporários)
+\end{minted}
+
+\paragraph{Fase 3: Compilação por faixa de índice.}
+A função \texttt{compileBlock retMap sv lm from to} compila os comandos no
+intervalo semi-aberto $[\mathit{from}, \mathit{to})$.  A recursão examina o
+comando no índice \texttt{from} e decide:
+
+\begin{itemize}
+  \item Se \texttt{sv[from] = LABEL $\ell_h$} e \texttt{sv[from+1] = CJUMP
+    ...}, tenta \texttt{tryWhile} para reconhecer o padrão de laço.  Se
+    bem-sucedido, gera \texttt{WBlock}/\texttt{WLoop} e compila o resto
+    recursivamente.
+  \item Se \texttt{sv[from] = CJUMP} com rótulos válidos, reconhece um
+    condicional e gera \texttt{WIf}.
+  \item \texttt{JUMP} é silenciosamente ignorado (já consumido nos padrões
+    acima ou é um desvio redundante).
+  \item Qualquer outro comando vai para \texttt{compileSingleStmt}.
+\end{itemize}
+
+\begin{minted}{haskell}
+tryWhile :: LabelMap -> SArr -> Int -> Label -> Label -> Label
+         -> Maybe (Int, Int, Label, Bool)
+tryWhile lm sv fallThrough la lb lh =
+  tryConvA <|> tryConvB
+  where
+    -- Convenção A: la=corpo (logo após CJUMP), lb=saída
+    tryConvA = do
+      posLa <- Map.lookup la lm
+      guard (posLa == fallThrough)
+      posLb <- Map.lookup lb lm
+      guard (posLb > fallThrough)
+      JUMP (NAME lh') <- Just (sv ! (posLb - 1))
+      guard (lh' == lh)
+      return (posLa, posLb, lb, False)  -- exitCond=False: usar i32.eqz
+
+    -- Convenção B: lb=corpo (logo após CJUMP), la=saída
+    tryConvB = do
+      posLb <- Map.lookup lb lm
+      guard (posLb == fallThrough)
+      posLa <- Map.lookup la lm
+      guard (posLa > fallThrough)
+      JUMP (NAME lh') <- Just (sv ! (posLa - 1))
+      guard (lh' == lh)
+      return (posLb, posLa, la, True)   -- exitCond=True: br_if direto
+\end{minted}
+
+% ============================================================================
+\section{O Runtime de Entrada e Saída}\label{sec:wat-runtime}
+% ============================================================================
+
+As funções \texttt{\$print} e \texttt{\$read\_int} são embutidas diretamente no
+módulo WAT gerado, usando as chamadas de sistema da interface WASI
+(\emph{WebAssembly System Interface}).  Não há módulo de runtime separado, o
+código gerado pelo compilador já é um módulo executável completo.
+
+\subsection{Funções WASI utilizadas}
+
+O compilador importa duas primitivas WASI:
+
+\begin{center}
+  \begin{tabular}{lll}
+    \hline
+    \textbf{Função WASI} & \textbf{Assinatura} & \textbf{Uso} \\
+    \hline
+    \texttt{fd\_write} & \texttt{(i32 i32 i32 i32) → i32} & escrever
+    em stdout \\
+    \texttt{fd\_read}  & \texttt{(i32 i32 i32 i32) → i32} & ler de stdin \\
+    \hline
+  \end{tabular}
+\end{center}
+
+Ambas recebem: \texttt{(fd, iovs\_ptr, iovs\_len, result\_ptr)}, onde
+\texttt{iovs\_ptr} aponta para uma estrutura iovec armazenada na memória linear.
+
+\subsection{Função \texttt{\$print}}
+
+Converte um \texttt{i32} para decimal, escreve os dígitos no buffer de saída
+(endereços 64–95) e chama \texttt{fd\_write}:
+
+\begin{minted}{text}
+(func $print (param $value i32)
+  (local $temp i32) (local $digit i32)
+  (local $len  i32) (local $neg   i32) (local $pos  i32)
+  ;; abs($value) → $temp; flag de sinal → $neg
+  ;; constrói string decimal de trás para frente a partir do endereço 95
+  ;; prepende '-' se negativo; acrescenta '\n'
+  ;; configura iovec[0] = {ptr, len} e chama fd_write(1, 0, 1, 16)
+)
+\end{minted}
+
+\subsection{Função \texttt{\$read\_int}}
+
+Configura a iovec para ler até 31 bytes de stdin no buffer de entrada (endereços
+32–62), depois percorre o buffer convertendo dígitos ASCII em \texttt{i32}:
+
+\begin{minted}{text}
+(func $read_int (result i32)
+  (local $result i32) (local $pos i32)
+  (local $char   i32) (local $neg i32)
+  ;; configura iovec[0] = {32, 31} e chama fd_read(0, 0, 1, 16)
+  ;; detecta sinal '-'; percorre dígitos com i32.load8_u
+  ;; retorna $result (ou -$result se negativo)
+)
+\end{minted}
+
+O código WAT completo de ambas as funções está no campo \texttt{wmRawDecls} do
+módulo gerado e pode ser inspecionado em
+\texttt{workspace/src/IR/Backend/WAT/IRToWAT.hs}.
+
+% ============================================================================
+\section{Execução de Programas WebAssembly}\label{sec:wat-exec}
+% ============================================================================
+
+O flake deste projeto disponibiliza as ferramentas \texttt{wabt} (que inclui
+\texttt{wat2wasm} e \texttt{wasm-validate}) e \texttt{wasmtime}.
+
+\subsection{Pipeline Completo}
+
+Como o módulo WAT gerado é auto-contido (inclui as funções de I/O e importa
+diretamente a interface WASI), o pipeline de compilação tem apenas três passos:
+
+\begin{enumerate}
+  \item \textbf{Compilar TImp para IRT:}
+\begin{minted}{bash}
+$ cabal run timp -- --ir -f prog.timp
+\end{minted}
+    Gera \texttt{prog.ir}.
+
+  \item \textbf{Compilar IRT para WAT:}
+\begin{minted}{bash}
+$ cabal run ir -- --wat prog.ir
+\end{minted}
+    Gera \texttt{prog.wat}, que já contém as funções \texttt{\$print} e
+    \texttt{\$read\_int} embutidas e importa
+    \texttt{fd\_write}/\texttt{fd\_read}
+    diretamente de \texttt{wasi\_snapshot\_preview1}.
+
+  \item \textbf{Montar e executar:}
+\begin{minted}{bash}
+$ wat2wasm prog.wat -o prog.wasm
+$ echo "5" | wasmtime prog.wasm
+\end{minted}
+\end{enumerate}
+
+Não é necessário compilar nem mesclar nenhum módulo de runtime separado.
+
+\subsection{Exemplo: Fatorial}\label{subsec:wat-factorial}
+
+Considere o programa IRT \texttt{factorial.ir} (gerado a partir de TImp):
+
+\begin{minted}{text}
+func main() {
+  t0 := call read_int();
+  t1 := call fact(t0);
+  call print(t1);
+  return;
+}
+
+func fact(n) {
+  t0 := 1;
+L_head:
+  cjump n <= 0 L_done L_body;
+L_body:
+  t0 := t0 * n;
+  n  := n - 1;
+  jump L_head;
+L_done:
+  return t0;
+}
+\end{minted}
+
+O gerador produz (com nomes simplificados para legibilidade):
+
+\begin{minted}{text}
+(func $fact (param $n i32) (result i32)
+  (local $t0 i32)
+  i32.const 1
+  local.set $t0
+  (block $L_done
+    (loop $L_head
+      local.get $n
+      i32.const 0
+      i32.le_s
+      br_if $L_done         ;; Convenção B: condição de saída direta
+      local.get $t0
+      local.get $n
+      i32.mul
+      local.set $t0
+      local.get $n
+      i32.const 1
+      i32.sub
+      local.set $n
+      br $L_head
+    )
+  )
+  local.get $t0
+  return
+  unreachable
+)
+\end{minted}
+
+\subsection{Verificação com wasm-validate}
+
+Antes de executar, é útil validar o módulo gerado:
+
+\begin{minted}{bash}
+$ wasm-validate prog.wasm
+\end{minted}
+
+Se não houver saída, o módulo é válido.  Erros de tipo, como o caso de uma
+função com \texttt{(result i32)} que não deixa valor na pilha, são
+detectados aqui.
+
+% ============================================================================
+% ============================================================================
+\section{Conclusão}\label{sec:wat-conclusao}
+% ============================================================================
+
+Este capítulo fechou o \emph{pipeline} de compilação das linguagens TWhile e
+TImp, traduzindo a representação intermediária em árvore (IRT) para módulos
+WebAssembly Text (WAT) executáveis.  O ponto de partida foi a definição formal
+do subconjunto WAT gerado: a gramática das S-expressões e a semântica
+operacional da máquina de pilha, que precisam o comportamento de cada
+instrução em termos de transformações sobre a pilha de operandos e o ambiente
+de variáveis locais.
+
+A partir dessa base formal, foram derivadas as regras de tradução dirigida por
+sintaxe $\mathcal{E}\llbracket \cdot \rrbracket$ e
+$\mathcal{S}\llbracket \cdot \rrbracket$, que cobrem expressões aritméticas,
+comandos de atribuição, chamadas de função e acesso à memória.  Um ponto de
+atenção especial foi a reconstrução do fluxo de controle estruturado: como a
+IRT representa sequências com rótulos e desvios explícitos, foi necessário um
+algoritmo de reconhecimento de padrões que identifica laços e condicionais na
+sequência linearizada e os converte para os construtores \texttt{block},
+\texttt{loop} e \texttt{if} de WAT, com suporte às duas convenções de geração
+de \texttt{CJUMP} presentes no compilador.
+
+A implementação em Haskell nos módulos \texttt{WATSyntax}, \texttt{WATPretty}
+e \texttt{IRToWAT} demonstrou a correspondência direta entre teoria e código:
+cada regra de tradução tem um caso correspondente no compilador, e a AST
+\texttt{WInstr} espelha precisamente o subconjunto da gramática WAT utilizado.
+O runtime de entrada e saída, as funções \texttt{\$print} e
+\texttt{\$read\_int}, é embutido diretamente no módulo gerado via
+\texttt{wmRawDecls}, dispensando qualquer módulo externo em tempo de execução.
+
+A escolha de WebAssembly como alvo final permite executar os programas
+compilados em qualquer ambiente que suporte WASI, como navegadores, servidores
+ou contêineres, sem dependência de uma arquitetura de hardware específica.
+Isso encerra, com uma implementação concreta e executável, o ciclo completo do
+compilador apresentado na disciplina: da análise léxica e sintática, passando
+pela verificação de tipos, geração e otimização da IRT, até a produção de
+código executável em três passos diretos: \texttt{timp --ir},
+\texttt{ir --wat} e \texttt{wat2wasm} + \texttt{wasmtime}.

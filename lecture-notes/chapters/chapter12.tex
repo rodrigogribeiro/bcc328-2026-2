@@ -1,0 +1,322 @@
+\chapter{Introdução à semântica operacional}
+
+\section{Introdução}
+
+Até agora, estudamos como reconhecer se uma sequência de tokens
+pertence a uma linguagem: a análise léxica e sintática. O próximo
+passo é atribuir \textbf{significado} aos programas reconhecidos:
+dado um programa sintaticamente correto, o que ele \emph{faz}? Essa
+pergunta é o objeto de estudo da \textbf{semântica de linguagens de
+programação}.
+
+Existem várias maneiras de formalizar o significado de um programa.
+Neste capítulo, estudaremos a \textbf{semântica operacional}, que
+define o significado de um programa descrevendo como ele é
+\emph{executado}, passo a passo, por uma máquina abstrata. A
+semântica operacional é particularmente útil para a construção de
+compiladores e interpretadores, pois a sua especificação se traduz
+diretamente em código.
+
+Apresentamos dois estilos de semântica operacional, ambos para uma
+linguagem de expressões aritméticas com adição, multiplicação e
+números inteiros:
+
+\begin{itemize}
+  \item
+    \textbf{Small-step} (\emph{pequenos passos}): define a execução
+    como uma sequência de reduções elementares, cada uma
+    simplificando a expressão um pouco.
+  \item
+    \textbf{Big-step} (\emph{grandes passos}): define diretamente o
+    valor final de uma expressão, abstraindo os passos intermediários.
+\end{itemize}
+
+Por fim, mostramos como a semântica big-step se traduz em um
+interpretador Haskell, disponível em
+
+\begin{flushleft}
+  \verb|Exp/Interp/ExpInterp.hs|
+\end{flushleft}
+
+\section{A Linguagem de Expressões}
+
+A linguagem que estudaremos é formada por três construções: números
+inteiros, adição e multiplicação. Sua sintaxe abstrata pode ser
+descrita pela gramática:
+
+\[
+  \begin{array}{lcl}
+    e & ::= & n \mid e_1 + e_2 \mid e_1 * e_2
+  \end{array}
+\]
+
+onde \(n\) representa um número inteiro. Em Haskell, o tipo de dado
+correspondente é:
+
+\begin{minted}{haskell}
+data Exp
+  = EInt Int
+  | Exp :+: Exp
+  | Exp :*: Exp
+\end{minted}
+
+Os construtores infixos \haskell{(:+:)} e
+\haskell{(:*:)} refletem diretamente a estrutura
+binária das operações.
+
+\section{Semântica Small-Step}
+
+A semântica \textbf{small-step} (ou semântica de redução) define a
+execução de uma expressão como uma sequência de passos de
+simplificação. Cada passo é descrito por uma \textbf{relação de
+redução} \(e \to e'\), que se lê ``a expressão \(e\) reduz em um
+passo para \(e'\)''.
+
+\subsection{Valores}
+
+Antes de apresentar as regras, precisamos distinguir as expressões
+que já chegaram ao seu resultado final, os \textbf{valores},
+das que ainda podem ser reduzidas. Para a linguagem de expressões
+aritméticas, o único tipo de valor é um número inteiro:
+
+\[
+  v ::= n
+\]
+
+\subsection{Regras de Redução}
+
+As regras de redução são apresentadas na forma de um sistema de
+inferência. Cada regra tem a forma:
+
+\[
+  \infer[_{\{Nome\}}]{\text{conclusão}}{\text{premissas}}
+\]
+
+Se não houver premissas, a regra é um \textbf{axioma} e é escrita sem
+a linha horizontal. Para a linguagem de expressões, temos as seguintes regras:
+
+\textbf{Adição de valores:}
+
+\[
+  \infer[_{\{Add\}}]{n_1 + n_2 \to n_1 \mathbin{\hat{+}} n_2}{}
+\]
+
+onde \(\mathbin{\hat{+}}\) denota a adição aritmética de inteiros
+(para distinguir o operador da linguagem do operador matemático).
+
+\textbf{Redução no lado esquerdo da adição:}
+
+\[
+  \infer[_{\{AddL\}}]{e_1 + e_2 \to e_1' + e_2}{e_1 \to e_1'}
+\]
+
+\textbf{Redução no lado direito da adição:}
+
+\[
+  \infer[_{\{AddR\}}]{n_1 + e_2 \to n_1 + e_2'}{e_2 \to e_2'}
+\]
+
+A regra (AddR) só se aplica quando o lado esquerdo já é um valor
+\(n_1\), garantindo uma ordem de avaliação da esquerda para a direita.
+
+As regras para multiplicação são análogas:
+
+\[
+  \infer[_{\{Mul\}}]{n_1 * n_2 \to n_1 \mathbin{\hat{*}} n_2}{}
+\]
+
+\[
+  \infer[_{\{MulL\}}]{e_1 * e_2 \to e_1' * e_2}{e_1 \to e_1'}
+\]
+
+\[
+  \infer[_{\{MulR\}}]{n_1 * e_2 \to n_1 * e_2'}{e_2 \to e_2'}
+\]
+
+\subsection{Sequências de Redução}
+
+A execução completa de uma expressão é uma sequência de reduções que
+termina em um valor:
+
+\[
+  e \to e_1 \to e_2 \to \cdots \to v
+\]
+
+Escrevemos \(e \to^* v\) quando existe tal sequência (zero ou mais
+passos). Para uma expressão que já é um valor, temos \(v \to^* v\)
+com zero passos.
+
+\subsection{Exemplo: Small-Step}
+
+Considere a expressão \((2 + 3) * 4\). A redução small-step procede assim:
+
+\[
+  (2 + 3) * 4 \xrightarrow{\text{MulL}} 5 * 4 \xrightarrow{\text{Mul}} 20
+\]
+
+O passo 1 usa (MulL) com premissa \(2 + 3 \to 5\) (pela regra Add). O
+passo 2 usa (Mul) diretamente, pois ambos os operandos já são valores.
+
+Considere agora \(1 + 2 * 3\). Aplicando (AddL) e depois (MulL):
+
+\[
+  1 + 2 * 3
+  \xrightarrow{\text{AddR}} 1 + 6
+  \xrightarrow{\text{Add}} 7
+\]
+
+Note que a regra (AddR) se aplica porque o lado esquerdo \(1\) já é
+um valor, forçando a avaliação do subtermos \(2 * 3\) antes da soma.
+
+\section{Semântica Big-Step}
+
+A semântica \textbf{big-step} (ou semântica natural) define
+diretamente a relação entre uma expressão e o seu valor final,
+abstraindo todos os passos intermediários. A relação é escrita \(e
+\Downarrow v\), que se lê ``a expressão \(e\) avalia para o valor \(v\)''.
+
+\subsection{Regras de Avaliação}
+
+\textbf{Um número avalia para si mesmo:}
+
+\[
+  \infer[_{\{Num\}}]{n \Downarrow n}{}
+\]
+
+\textbf{Adição:}
+
+\[
+  \infer[_{\{Add\}}]{e_1 + e_2 \Downarrow n_1 \mathbin{\hat{+}}
+  n_2}{e_1 \Downarrow n_1 & e_2 \Downarrow n_2}
+\]
+
+\textbf{Multiplicação:}
+
+\[
+  \infer[_{\{Mul\}}]{e_1 * e_2 \Downarrow n_1 \mathbin{\hat{*}}
+  n_2}{e_1 \Downarrow n_1 & e_2 \Downarrow n_2}
+\]
+
+A estrutura é mais direta que a semântica small-step: cada regra
+corresponde exatamente a um construtor da árvore sintática, e as
+premissas avaliam recursivamente os sub-termos.
+
+\subsection{Exemplos: Big-Step}
+
+\textbf{Exemplo 1:} \((2 + 3) * 4 \Downarrow 20\)
+
+A derivação é uma árvore de inferência:
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{}{2 \Downarrow 2} \quad \dfrac{}{3 \Downarrow 3}
+    }{2 + 3 \Downarrow 5}
+    \quad
+    \dfrac{}{4 \Downarrow 4}
+  }{(2 + 3) * 4 \Downarrow 20}
+\]
+
+\textbf{Exemplo 2:} \(1 + 2 * 3 \Downarrow 7\)
+
+\[
+  \dfrac{
+    \dfrac{}{1 \Downarrow 1}
+    \quad
+    \dfrac{
+      \dfrac{}{2 \Downarrow 2} \quad \dfrac{}{3 \Downarrow 3}
+    }{2 * 3 \Downarrow 6}
+  }{1 + 2 * 3 \Downarrow 7}
+\]
+
+Note que a árvore reflete diretamente a estrutura da árvore sintática
+abstrata da expressão, é exatamente essa correspondência que torna
+a semântica big-step tão conveniente para a implementação de interpretadores.
+
+\section{Implementação em Haskell}
+
+A semântica big-step se traduz em Haskell de forma quase literal.
+Cada regra de inferência corresponde a uma equação da função
+\haskell{eval}:
+
+\begin{minted}{haskell}
+module Exp.Interp.ExpInterp (eval) where
+
+import Exp.Frontend.Syntax.ExpSyntax
+
+eval :: Exp -> Int
+eval (EInt n)    = n
+eval (e1 :+: e2) = eval e1 + eval e2
+eval (e1 :*: e2) = eval e1 * eval e2
+\end{minted}
+
+A correspondência com as regras semânticas é direta:
+
+\begin{itemize}
+  \item A equação \haskell{eval (EInt n) = n} implementa
+    a regra (Num): um número \(n\) avalia para si mesmo.
+  \item A equação \haskell{eval (e1 :+: e2) = eval e1 + eval e2} implementa
+    a regra (Add): avalia recursivamente \(e_1\)
+    e \(e_2\) e soma os resultados.
+  \item A equação \haskell{eval (e1 :*: e2) = eval e1 * eval e2} implementa
+    a regra (Mul) da mesma forma.
+\end{itemize}
+
+O casamento de padrões (pattern matching) de Haskell corresponde às
+premissas de cada regra, e a chamada recursiva a
+\haskell{eval} corresponde a aplicar a regra à sub-expressão.
+
+\subsection{Executando o Interpretador}
+
+O interpretador é parte do compilador
+\haskell{exp}. Para usá-lo em modo de interpretação,
+basta invocar:
+
+\begin{verbatim}
+cabal run exp -- --interp --file input.exp
+\end{verbatim}
+
+onde \verb|input.exp| contém uma expressão na
+linguagem. Por exemplo, para a entrada
+
+\begin{verbatim}
+(2 + 3) * 4
+\end{verbatim}
+
+o interpretador produz \haskell{20}, confirmando o
+resultado que calculamos pelas derivações semânticas acima.
+
+\subsection{Totalidade e Terminação}
+
+A função \haskell{eval} é \textbf{total}: está
+definida para todas as expressões do tipo
+\haskell{Exp} e sempre termina. Isso pode ser
+verificado observando que cada chamada recursiva é feita sobre
+sub-expressões estritamente menores, a estrutura da árvore
+sintática abstrata diminui a cada nível. Essa propriedade é garantida
+pela indução estrutural e corresponde, na semântica, ao fato de que
+toda expressão da linguagem possui um valor (não há expressões que
+ficam presas sem produzir resultado).
+
+\section{Conclusão}
+
+Neste capítulo, introduzimos a semântica operacional como ferramenta
+para definir o significado de programas. Estudamos dois estilos
+complementares:
+
+\begin{itemize}
+  \item
+    A \textbf{semântica small-step} expõe cada passo de redução
+    individualmente, permitindo raciocinar sobre o processo de execução.
+  \item
+    A \textbf{semântica big-step} relaciona expressões diretamente
+    aos seus valores finais e se traduz quase literalmente em uma
+    função recursiva Haskell.
+\end{itemize}
+
+A implementação do interpretador \haskell{eval}
+demonstra que uma especificação semântica formal não é apenas um
+documento teórico: ela é um projeto de implementação preciso. Nos
+próximos capítulos, estenderemos esta linguagem com variáveis,
+comandos e funções, exigindo que a semântica modele também
+\textbf{ambientes} e \textbf{efeitos}.

@@ -1,0 +1,1138 @@
+\chapter{Subtipagem e Featherweight Java}
+
+\section{Introdução}
+
+Sistemas de tipos baseados em igualdade exata de tipos são corretos,
+mas às vezes rejeitam programas perfeitamente seguros. Se uma função
+espera um valor do tipo \(\mathit{Number}\) e fornecemos um
+\(\mathit{Int}\), por que o compilador deveria reclamar? Afinal, todo
+inteiro é um número.
+
+A \textbf{subtipagem} é o mecanismo que torna esse raciocínio
+preciso. Uma relação de subtipagem \(S <: T\) afirma que \emph{todo
+  valor do tipo \(S\) pode ser usado com segurança onde um valor do
+tipo \(T\) é esperado}: o \textbf{princípio de substituição de
+Liskov}. Essa ideia é central em linguagens orientadas a objetos e
+permite que subclasses herdem e estendam comportamentos de
+superclasses sem quebrar contratos de tipo.
+
+Neste capítulo, introduzimos a subtipagem em duas etapas. Primeiro,
+definimos um \textbf{$\lambda$-cálculo com \(\mathsf{Int}\),
+\(\mathsf{Bool}\) e funções}, onde \(\mathsf{Bool} <: \mathsf{Int}\),
+e estudamos as propriedades de progresso, preservação e
+decidibilidade. Em seguida, apresentamos o \textbf{Featherweight Java
+(FJ)}, um núcleo formal mínimo de Java que captura a essência da
+subtipagem por herança de classes. Finalizamos com a implementação
+Haskell completa do verificador de tipos e do interpretador de FJ.
+
+\section{$\lambda$-cálculo com Subtipagem}
+
+\subsection{Sintaxe}
+
+O $\lambda$-cálculo com \(\mathsf{Int}\), \(\mathsf{Bool}\) e funções
+tem a seguinte gramática:
+
+\[
+  \begin{array}{rcll}
+    t & ::= & x & \text{variável} \\
+      & |   & n & \text{literal inteiro}\ (n \in \mathbb{Z}) \\
+      & |   & \mathsf{true} \mid \mathsf{false} & \text{literais booleanos} \\
+      & |   & t + t & \text{adição} \\
+      & |   & \mathsf{if}\ t\ \mathsf{then}\ t\ \mathsf{else}\ t & \text{condicional} \\
+      & |   & \lambda x {:} T.\, t & \text{abstração tipada} \\
+      & |   & t\, t & \text{aplicação}
+  \end{array}
+\]
+
+Os tipos são:
+
+\[
+  \begin{array}{rcll}
+    T & ::= & \mathsf{Int}  & \text{inteiros} \\
+      & |   & \mathsf{Bool} & \text{booleanos} \\
+      & |   & T \to T       & \text{funções}
+  \end{array}
+\]
+
+Os valores (formas canônicas) são os termos totalmente avaliados:
+
+\[
+  \begin{array}{rcll}
+    v & ::= & n & \text{inteiro} \\
+      & |   & \mathsf{true} \mid \mathsf{false} & \text{booleano} \\
+      & |   & \lambda x {:} T.\, t & \text{abstração}
+  \end{array}
+\]
+
+\subsection{A Relação de Subtipagem}
+
+A subtipagem é definida pela menor relação reflexiva e transitiva que
+satisfaz as seguintes regras:
+
+\[ \infer[S-Refl]{T <: T}{} \qquad \infer[S-Trans]{S <: T}{S <: U \quad U <: T}
+\]
+
+A regra central do nosso exemplo é que \(\mathsf{Bool}\) é um subtipo
+de \(\mathsf{Int}\). Interpretamos \(\mathsf{true}\) como \(1\) e
+\(\mathsf{false}\) como \(0\), de modo que todo booleano pode ser
+promovido a inteiro sem perda de informação:
+
+\[ \infer[S-Bool]{\mathsf{Bool} <: \mathsf{Int}}{} \]
+
+Para tipos função, a subtipagem é \textbf{contravariante} no domínio
+e \textbf{covariante} no contradomínio:
+
+\[ \infer[S-Arrow]{S_1 \to S_2 <: T_1 \to T_2}{T_1 <: S_1 \quad S_2 <: T_2} \]
+
+A intuição para tipos funcionais é a seguinte: se \(f : S_1 \to S_2\)
+e queremos usar \(f\) onde se espera \(T_1 \to T_2\), então:
+
+\begin{itemize}
+  \item
+    O chamador fornecerá argumentos do tipo \(T_1\). Como \(T_1 <:
+    S_1\), esses argumentos são aceitos por \(f\).
+  \item
+    \(f\) retorna \(S_2\). Como \(S_2 <: T_2\), o resultado pode ser
+    usado onde se espera \(T_2\).
+\end{itemize}
+
+\subsection{Sistema de Tipos}
+
+O contexto de tipagem \(\Gamma\) mapeia variáveis a tipos:
+\(\Gamma = x_1 {:} T_1, \ldots, x_n {:} T_n\).
+
+A regra de \textbf{subsunção} é o elo entre a relação de subtipagem e
+o sistema de tipos:
+
+\[ \infer[T-Sub]{\Gamma \vdash t : T}{\Gamma \vdash t : S \quad S <: T} \]
+
+Esta regra diz: se \(t\) tem tipo \(S\) e \(S\) é um subtipo de
+\(T\), então \(t\) também tem tipo \(T\). As demais regras são:
+
+\[ \infer[T-Var]{\Gamma \vdash x : T}{x {:} T \in \Gamma} \qquad
+\infer[T-Int]{\Gamma \vdash n : \mathsf{Int}}{} \]
+
+\[ \infer[T-True]{\Gamma \vdash \mathsf{true} : \mathsf{Bool}}{} \qquad
+\infer[T-False]{\Gamma \vdash \mathsf{false} : \mathsf{Bool}}{} \]
+
+\[ \infer[T-Add]{\Gamma \vdash t_1 + t_2 : \mathsf{Int}}{\Gamma \vdash t_1 :
+\mathsf{Int} \quad \Gamma \vdash t_2 : \mathsf{Int}} \]
+
+\[ \infer[T-If]{\Gamma \vdash \mathsf{if}\ t_1\ \mathsf{then}\ t_2\
+  \mathsf{else}\ t_3 : T}{\Gamma \vdash t_1 : \mathsf{Bool} \quad \Gamma \vdash
+t_2 : T \quad \Gamma \vdash t_3 : T} \]
+
+\[ \infer[T-Abs]{\Gamma \vdash \lambda x {:} T_1.\, t : T_1 \to T_2}{\Gamma,\,
+  x {:} T_1 \vdash t : T_2} \qquad \infer[T-App]{\Gamma \vdash t_1\, t_2 :
+T_2}{\Gamma \vdash t_1 : T_1 \to T_2 \quad \Gamma \vdash t_2 : T_1} \]
+
+Observe que a regra para if exige que os dois ramos tenham o
+\textbf{mesmo} tipo \(T\). Graças à subsunção, se os ramos tiverem
+tipos distintos mas relacionados por subtipagem, podemos elevá-los ao
+supertipo comum antes de aplicar a regra.
+
+\subsection{Semântica Operacional Small-Step}
+
+A semântica procede por redução call-by-value. As regras de
+congruência propagam a avaliação para os subtermos:
+
+\[ \infer[E-AddL]{t_1 + t_2 \to t_1' + t_2}{t_1 \to t_1'} \qquad
+  \infer[E-AddR]{n + t \to n + t'}{t \to t'} \qquad \infer[E-Add]{n_1 + n_2 \to
+n_1 \oplus n_2}{} \]
+
+\[ \infer[E-IfCond]{\mathsf{if}\: t_1\:\mathsf{then}\: t_2\:
+    \mathsf{else}\: t_3 \to \mathsf{if}\: t_1'\: \mathsf{then}\: t_2\:
+\mathsf{else}\: t_3}{t_1 \to t_1'} \]
+
+\[ \infer[E-IfTrue]{\mathsf{if}\: \mathsf{true}\: \mathsf{then}\: t_2\:
+  \mathsf{else}\: t_3 \to t_2}{} \qquad \infer[E-IfFalse]{\mathsf{if}\:
+\mathsf{false}\: \mathsf{then}\: t_2\: \mathsf{else}\: t_3 \to t_3}{} \]
+
+\[ \infer[E-AppFun]{t_1\, t_2 \to t_1'\, t_2}{t_1 \to t_1'} \qquad
+  \infer[E-AppArg]{v\, t \to v\, t'}{t \to t'} \qquad \infer[E-Beta]{(\lambda x
+{:} T.\, t)\, v \to t[x \mapsto v]}{} \]
+
+A subtipagem \(\mathsf{Bool} <: \mathsf{Int}\) implica que booleanos
+podem aparecer como operandos de \(+\). Neste caso, o interpretador
+os converte numericamente (\(\mathsf{true} \mapsto 1\),
+\(\mathsf{false} \mapsto 0\)) antes de efetuar a adição.
+
+\subsection{Propriedades do Sistema de Tipos}
+
+\subsubsection{Lema das Formas Canônicas}
+
+\textbf{Lema (Formas Canônicas).} Seja \(v\) um valor bem tipado em
+contexto vazio.
+
+\begin{enumerate}
+  \item
+    Se \(\vdash v : \mathsf{Int}\), então \(v\) é um literal inteiro
+    \(n\) \emph{ou} \(v \in \{\mathsf{true}, \mathsf{false}\}\).
+  \item
+    Se \(\vdash v : \mathsf{Bool}\) \emph{e} \(v\) não pode ter um
+    tipo estritamente menor que \(\mathsf{Bool}\), então
+    \(v \in \{\mathsf{true}, \mathsf{false}\}\).
+  \item
+    Se \(\vdash v : T_1 \to T_2\), então \(v = \lambda x {:} T.\, t\)
+    com \(T <: T_1\).
+\end{enumerate}
+
+\subsubsection{Progresso}
+
+\textbf{Teorema (Progresso).} Se \(\vdash t : T\), então ou \(t\) é
+um valor, ou existe \(t'\) tal que \(t \to t'\).
+
+\emph{Demonstração (esboço).} Por indução na derivação de \(\vdash t : T\).
+
+\begin{itemize}
+  \item
+    \textbf{T-Var}: impossível em contexto vazio.
+  \item
+    \textbf{T-Int, T-True, T-False}: \(t\) já é um valor.
+  \item
+    \textbf{T-Add}: pela hipótese de indução, \(t_1\) e \(t_2\) são
+    valores ou reduzem. Se ambos são valores, o Lema das Formas
+    Canônicas garante que são representáveis como
+    inteiros, então \textbf{E-Add} se aplica.
+  \item
+    \textbf{T-If}: pelo Lema das Formas Canônicas, se \(t_1\) é um
+    valor do tipo \(\mathsf{Bool}\), é \(\mathsf{true}\) ou
+    \(\mathsf{false}\), e \textbf{E-IfTrue} ou \textbf{E-IfFalse} se aplicam.
+  \item
+    \textbf{T-Abs}: \(t\) já é um valor.
+  \item
+    \textbf{T-App}: se \(t_1\) é um valor do tipo \(T_1 \to T_2\),
+    pelo Lema das Formas Canônicas é uma abstração e \textbf{E-Beta} se aplica.
+  \item
+    \textbf{T-Sub}: segue das hipóteses de indução sobre o subtermo. \(\square\)
+\end{itemize}
+
+\subsubsection{Preservação}
+
+\textbf{Lema (Substituição).} Se \(\Gamma, x {:} S \vdash t : T\) e
+\(\Gamma \vdash s : S\), então \(\Gamma
+\vdash t[x \mapsto s] : T\).
+
+\textbf{Teorema (Preservação).} Se \(\vdash t : T\) e \(t \to t'\),
+então \(\vdash t' : T\).
+
+\emph{Demonstração (esboço).} Por indução simultânea na derivação de
+tipagem e na redução.
+
+\begin{itemize}
+  \item
+    \textbf{E-Beta}: a redução \((\lambda x {:} T_1.\, t)\, v \to t[x
+    \mapsto v]\) requer \(\vdash v : T_1\). Pelo Lema da
+    Substituição, \(\vdash t[x \mapsto v] : T_2\), que é o tipo retornado por \textbf{T-App}.
+  \item
+    \textbf{E-Add}: \(n_1 + n_2\) reduz ao inteiro resultante, que
+    tem tipo \(\mathsf{Int}\) por \textbf{T-Int}.
+  \item
+    \textbf{E-IfTrue/E-IfFalse}: o branch selecionado tem o tipo
+    exigido pela premissa de \textbf{T-If}.
+  \item
+    Regras de congruência: seguem diretamente das hipóteses de indução.
+  \item
+    \textbf{T-Sub}: como \(t : S\) e \(S <: T\), após a redução temos
+    \(t' : S\) pela hipótese de indução, e \(t' : T\) por
+    \textbf{T-Sub}. \(\square\)
+\end{itemize}
+
+\subsubsection{Decidibilidade da Subtipagem}
+
+\textbf{Teorema (Decidibilidade).} A relação \(S <: T\) é decidível
+para os tipos do nosso cálculo.
+
+\emph{Demonstração.} O conjunto de tipos é indutivamente definido por
+três construtores (\(\mathsf{Int}\), \(\mathsf{Bool}\), \(\to\)).
+Podemos verificar \(S <: T\) por indução estrutural simultânea em \(S\) e \(T\):
+
+\begin{enumerate}
+  \item
+    Se \(S = T\), retorne \(\mathsf{true}\) por \textbf{S-Refl}.
+  \item
+    Se \(S = \mathsf{Bool}\) e \(T = \mathsf{Int}\), retorne
+    \(\mathsf{true}\) por \textbf{S-Bool}.
+  \item
+    Se \(S = S_1 \to S_2\) e \(T = T_1 \to T_2\), retorne
+    \(T_1 <: S_1 \land S_2 <: T_2\) por \textbf{S-Arrow} (recursão estrutural,
+    logo termina).
+  \item
+    Caso contrário, retorne \(\mathsf{false}\).
+\end{enumerate}
+
+A transitividade não precisa ser verificada explicitamente: a única
+cadeia possível de comprimento \(> 1\) é
+\(\mathsf{Bool} <: \mathsf{Int} <: \mathsf{Int}\), que
+já é coberta pelos casos acima. Logo o algoritmo é correto e termina.
+\(\square\)
+
+\section{Featherweight Java}
+
+O \textbf{Featherweight Java (FJ)} foi proposto por Igarashi, Pierce
+e Wadler (2001) como um núcleo formal mínimo de Java. Ele captura os
+mecanismos essenciais da orientação a objetos (classes, herança,
+campos, métodos, criação de objetos e \emph{casts}) numa linguagem
+pequena o suficiente para análise formal rigorosa.
+
+FJ omite deliberadamente aspectos que aumentariam a complexidade sem
+iluminar os princípios centrais: não há atribuição (todas as
+variáveis são imutáveis), não há controle de fluxo, não há
+interfaces, não há sobrecarga de operadores e não há tipos primitivos
+(tudo é objeto). O que permanece é suficiente para demonstrar
+progresso, preservação e a correção dos \emph{casts}.
+
+\subsection{Sintaxe}
+
+\subsubsection{Tipos e Nomes}
+
+Em FJ, \emph{todo tipo é um nome de classe}. O universo de tipos é o
+conjunto dos nomes das classes declaradas, mais a classe raiz
+\(\mathsf{Object}\) que está sempre presente implicitamente.
+
+\[ T, C, D, E ::= \text{nome de classe} \qquad \mathsf{Object}\ \text{é a raiz
+implícita} \]
+
+\subsubsection{Declarações de Classe}
+
+Uma declaração de classe tem a forma:
+
+\[ \mathtt{class}\ C\ \mathtt{extends}\ D\ \{\ \overline{T\ f};\ K\
+\overline{M}\ \} \]
+
+onde \(\overline{T\ f}\) é uma lista de campos declarados (com
+tipos), \(K\) é o construtor e \(\overline{M}\) é uma lista de
+métodos. Usamos a notação com barra para listas: \(\bar{f}\) abrevia
+\(f_1, \ldots, f_n\).
+
+O \textbf{construtor} deve ter a forma canônica:
+
+\[ C(\overline{D\ g},\, \overline{T\ f})\ \{\ \mathtt{super}(\bar{g});\
+\overline{\mathtt{this}.f = f};\ \} \]
+
+onde \(\bar{g}\) são os campos herdados (passados ao
+\(\mathtt{super}\)) e \(\bar{f}\) são os campos próprios de \(C\).
+
+Uma \textbf{declaração de método} tem a forma:
+
+\[ T\ m(\overline{T\ x})\ \{\ \mathtt{return}\ e;\ \} \]
+
+A gramática completa das expressões é:
+
+\[
+  \begin{array}{rcll}
+    e & ::= & x              & \text{variável} \\
+      & |   & e.f            & \text{acesso a campo} \\
+      & |   & e.m(\bar{e})   & \text{invocação de método} \\
+      & |   & \mathtt{new}\ C(\bar{e}) & \text{criação de objeto} \\
+      & |   & (C)\ e         & \text{cast}
+  \end{array}
+\]
+
+A variável especial \(\mathtt{this}\) é tratada como variável comum
+no corpo dos métodos.
+
+\subsubsection{Valores}
+
+O único tipo de valor em FJ é um objeto totalmente construído:
+
+\[ v ::= \mathtt{new}\ C(\bar{v}) \]
+
+Um valor é uma instância de classe cujos campos são, recursivamente,
+todos valores.
+
+\subsection{Tabela de Classes}
+
+A \textbf{tabela de classes} \(\mathit{CT}\) é um mapeamento finito
+de nomes de classe para suas declarações, construída a partir do
+programa. Ela está implícita em todas as regras a seguir.
+
+Definimos quatro funções de consulta:
+
+\textbf{\(\mathit{fields}(C)\)}: lista de \emph{todos} os campos
+de \(C\), incluindo os herdados, na ordem de declaração da raiz para a folha:
+
+\[ \mathit{fields}(\mathsf{Object}) = \bullet \qquad \infer{\mathit{fields}(C)
+  = \bar{D}\ \bar{g},\, \overline{C'\ f}}{\mathit{CT}(C) = \mathtt{class}\ C\
+\mathtt{extends}\ D\ \{\ldots\} \quad \mathit{fields}(D) = \bar{D}\ \bar{g}} \]
+
+\textbf{\(\mathit{mtype}(m, C)\)}: assinatura do método \(m\) em
+\(C\) (busca na hierarquia):
+
+\[ \infer{\mathit{mtype}(m, C) = \bar{T} \to T}{\mathit{CT}(C) = \ldots\ T\
+  m(\overline{T\ x})\ \{\ldots\}\ \ldots} \qquad \infer{\mathit{mtype}(m, C) =
+U}{m \notin \mathit{CT}(C) \quad \mathit{mtype}(m, D) = U} \]
+
+\textbf{\(\mathit{mbody}(m, C)\)}: parâmetros e corpo do método
+\(m\) em \(C\):
+
+\[ \infer{\mathit{mbody}(m, C) = (\bar{x}, e)}{\mathit{CT}(C) = \ldots\ T\
+m(\overline{T\ x})\ \{\ \mathtt{return}\ e;\ \}\ \ldots} \]
+
+\textbf{Subtipagem \(C <: D\)}: fecho reflexivo-transitivo da
+relação \(\mathtt{extends}\):
+
+\[ \infer[S-Refl]{C <: C}{} \qquad \infer[S-Trans]{C <: E}{C <: D \quad D <: E}
+  \qquad \infer[S-Extends]{C <: D}{\mathit{CT}(C) = \mathtt{class}\ C\
+\mathtt{extends}\ D\ \{\ldots\}} \]
+
+Todo tipo é subtipo de \(\mathsf{Object}\) (por S-Trans e S-Extends
+aplicados iterativamente até a raiz).
+
+\subsection{Semântica Operacional}
+
+A semântica é small-step call-by-value. As regras de redução são:
+
+\textbf{Acesso a campo (B-Field):}
+
+\[ \infer[B-Field]{(\mathtt{new}\ C(\bar{v})).f_i \to v_i}{\mathit{fields}(C) =
+\overline{C\ f}} \]
+
+O valor \(v_i\) é o \(i\)-ésimo argumento do construtor,
+correspondendo ao campo \(f_i\) na lista plana de campos.
+
+\textbf{Invocação de método (B-Invk):}
+
+\[ \infer[B-Invk]{(\mathtt{new}\ C(\bar{v})).m(\bar{u}) \to e[\bar{x} \mapsto
+      \bar{u},\, \mathtt{this} \mapsto
+  \mathtt{new}\ C(\bar{v})]}{\mathit{mbody}(m, C)
+= (\bar{x}, e)} \]
+
+\textbf{Cast (B-Cast):}
+
+\[ \infer[B-Cast]{(C)\ (\mathtt{new}\ D(\bar{v})) \to \mathtt{new}\
+D(\bar{v})}{D <: C} \]
+
+O \emph{cast} é verificado em tempo de execução: se \(D\) não é
+subtipo de \(C\), uma \(\mathsf{ClassCastException}\) é lançada.
+
+\textbf{Regras de congruência:}
+
+\[ \infer[E-Field]{e_0.f \to e_0'.f}{e_0 \to e_0'} \qquad
+\infer[E-InvkRecv]{e_0.m(\bar{e}) \to e_0'.m(\bar{e})}{e_0 \to e_0'} \]
+
+\[ \infer[E-InvkArg]{v_0.m(\ldots, e_i, \ldots) \to v_0.m(\ldots, e_i',
+  \ldots)}{e_i \to e_i'} \qquad \infer[E-New]{\mathtt{new}\ C(\ldots,
+    e_i, \ldots)
+\to \mathtt{new}\ C(\ldots, e_i', \ldots)}{e_i \to e_i'} \]
+
+\[ \infer[E-Cast]{(C)\ e \to (C)\ e'}{e \to e'} \]
+
+\subsection{Sistema de Tipos}
+
+\subsubsection{Tipagem de Expressões}
+
+As regras de tipagem usam um contexto \(\Gamma\) que mapeia variáveis
+a tipos. A regra de subsunção, análoga à do $\lambda$-cálculo com
+subtipagem, é implícita: em qualquer posição onde se espera um tipo
+\(T\), aceita-se um subtipo \(S <: T\).
+
+\[ \infer[T-Var]{\Gamma \vdash x : T}{x {:} T \in \Gamma} \]
+
+\[ \infer[T-Field]{\Gamma \vdash e_0.f_i : T_i}{\Gamma \vdash e_0 : C_0 \quad
+\mathit{fields}(C_0) = \overline{T\ f}} \]
+
+\[ \infer[T-Invk]{\Gamma \vdash e_0.m(\bar{e}) : T}{\Gamma \vdash e_0 : C_0
+    \quad \mathit{mtype}(m, C_0) = \overline{T} \to T \quad \Gamma
+    \vdash \bar{e} :
+\bar{C} \quad \bar{C} <: \bar{T}} \]
+
+\[ \infer[T-New]{\Gamma \vdash \mathtt{new}\ C(\bar{e}) : C}{\mathit{fields}(C)
+    = \overline{T\ f} \quad \Gamma \vdash \bar{e} : \bar{C} \quad \bar{C} <:
+\bar{T}} \]
+
+Para os \emph{casts}, FJ distingue três casos que merecem atenção:
+
+\[ \infer[T-UCast]{\Gamma \vdash (C)\ e_0 : C}{\Gamma \vdash e_0 : D \quad D <:
+  C} \qquad \infer[T-DCast]{\Gamma \vdash (C)\ e_0 : C}{\Gamma \vdash e_0 : D
+\quad C <: D \quad C \neq D} \]
+
+\[ \infer[T-SCast]{\Gamma \vdash (C)\ e_0 : C}{\Gamma \vdash e_0 : D \quad C
+\not<: D \quad D \not<: C \quad \text{(aviso estúpido)}} \]
+
+\begin{itemize}
+  \item
+    \textbf{T-UCast} (\emph{upcast}): \(D <: C\). O cast é
+    estritamente seguro em tempo de compilação: um subtipo sempre
+    pode ser tratado como supertipo.
+  \item
+    \textbf{T-DCast} (\emph{downcast}): \(C <: D\) com \(C \neq D\).
+    O cast pode falhar em tempo de execução se o objeto real não for
+    instância de \(C\). O verificador de tipos aceita, mas o
+    interpretador verifica dinamicamente.
+  \item
+    \textbf{T-SCast} (\emph{stupid cast}): nenhuma relação de
+    subtipagem existe entre \(C\) e \(D\). FJ ainda aceita o programa
+    (emitindo um aviso), para não rejeitar código que pode ser
+    correto em combinação com tipos parametrizados.
+\end{itemize}
+
+\subsubsection{Boa Formação de Métodos}
+
+Um método \(T\ m(\overline{T\ x})\{\ \mathtt{return}\ e;\ \}\) na
+classe \(C\) é bem formado se:
+
+\[ \infer[T-Method]{T\ m(\overline{T\ x})\{\ \mathtt{return}\ e;\ \}\
+  \mathsf{OK}\ \mathsf{em}\ C}{\overline{x {:} T},\, \mathtt{this}
+    {:} C \vdash e
+: S \quad S <: T \quad \text{override}(m, D, \overline{T} \to T)} \]
+
+A condição \(\text{override}(m, D, \overline{T} \to T)\) exige que,
+se \(m\) já é declarado em uma superclasse \(D\) de \(C\), a
+assinatura seja idêntica (FJ não suporta contravariância nos
+overrides para simplificar a teoria).
+
+\subsubsection{Boa Formação de Classes}
+
+Uma declaração de classe é bem formada se:
+
+\begin{enumerate}
+  \item
+    A superclasse existe em \(\mathit{CT}\).
+  \item
+    O construtor aceita exatamente todos os campos (herdados +
+    próprios) na ordem correta, chama \(\mathtt{super}\) com os
+    campos herdados e inicializa exatamente os campos próprios.
+  \item
+    Cada método é bem formado.
+\end{enumerate}
+
+\subsubsection{Propriedades}
+
+\textbf{Teorema (Progresso para FJ).} Se \(\vdash e : T\) e \(e\) não
+é um valor, então existe \(e'\) tal que \(e \to e'\) ou \(e\) lança
+uma \(\mathsf{ClassCastException}\).
+
+A ressalva sobre a exceção de cast é essencial: \emph{downcasts}
+podem falhar em tempo de execução mesmo que o programa seja bem
+tipado. FJ é, portanto, um sistema de tipos \emph{unsound} no sentido
+estrito, mas captura com fidelidade o comportamento real de Java.
+
+\textbf{Teorema (Preservação para FJ).} Se \(\vdash e : T\) e \(e \to
+e'\), então \(\vdash e' : T'\) com \(T' <: T\).
+
+O tipo do resultado pode ser um \emph{subtipo} do tipo original,
+por exemplo, após um downcast bem-sucedido. Esse enfraquecimento é
+necessário e esperado.
+
+\section{Implementação}
+
+\subsection{Sintaxe Abstrata}
+
+O módulo \texttt{FJ.Frontend.Syntax.FJSyntax} define
+os tipos Haskell correspondentes à gramática de FJ:
+
+\begin{minted}{haskell}
+type ClassName  = String
+type FieldName  = String
+type MethodName = String
+type VarName    = String
+
+newtype FJType = FJType { unFJType :: ClassName }
+  deriving (Show, Eq, Ord)
+
+data Program = Program
+  { progClasses :: [ClassDecl]
+  , progMain    :: Expr
+  }
+
+data ClassDecl = ClassDecl
+  { cdName    :: ClassName
+  , cdSuper   :: ClassName
+  , cdFields  :: [(FJType, FieldName)]
+  , cdCtor    :: Constructor
+  , cdMethods :: [MethodDecl]
+  }
+
+data Constructor = Constructor
+  { ctorClass  :: ClassName
+  , ctorParams :: [(FJType, VarName)]
+  , ctorSuper  :: [VarName]
+  , ctorInits  :: [(FieldName, VarName)]
+  }
+
+data MethodDecl = MethodDecl
+  { mdRetType :: FJType
+  , mdName    :: MethodName
+  , mdParams  :: [(FJType, VarName)]
+  , mdBody    :: Expr
+  }
+
+data Expr
+  = EVar    VarName
+  | EField  Expr FieldName
+  | EInvk   Expr MethodName [Expr]
+  | ENew    ClassName [Expr]
+  | ECast   ClassName Expr
+\end{minted}
+
+\subsection{Tabela de Classes}
+
+O módulo \texttt{FJ.Frontend.ClassTable.ClassTable}
+implementa as quatro funções de consulta definidas na semântica formal:
+
+\begin{minted}{haskell}
+type ClassTable = Map.Map ClassName ClassDecl
+
+-- Todos os campos de C (herdados + próprios), raiz primeiro.
+classFields :: ClassTable -> ClassName -> Maybe [(FJType, FieldName)]
+classFields _  "Object" = Just []
+classFields ct c = do
+    cd <- Map.lookup c ct
+    parentFs <- classFields ct (cdSuper cd)
+    return (parentFs ++ cdFields cd)
+
+-- Assinatura de m em C, buscando na hierarquia.
+mtype :: ClassTable -> MethodName -> ClassName
+      -> Maybe ([FJType], FJType)
+mtype _  _ "Object" = Nothing
+mtype ct m c = do
+    cd <- Map.lookup c ct
+    case filter (\md -> mdName md == m) (cdMethods cd) of
+      (md:_) -> Just (map fst (mdParams md), mdRetType md)
+      []     -> mtype ct m (cdSuper cd)
+
+-- Parâmetros e corpo de m em C.
+mbody :: ClassTable -> MethodName -> ClassName
+      -> Maybe ([VarName], Expr)
+mbody _  _ "Object" = Nothing
+mbody ct m c = do
+    cd <- Map.lookup c ct
+    case filter (\md -> mdName md == m) (cdMethods cd) of
+      (md:_) -> Just (map snd (mdParams md), mdBody md)
+      []     -> mbody ct m (cdSuper cd)
+
+-- Subtipagem: fecho reflexivo-transitivo de extends.
+isSubtype :: ClassTable -> ClassName -> ClassName -> Bool
+isSubtype _  c d | c == d   = True
+isSubtype _  _ "Object"     = True
+isSubtype ct c d =
+    case Map.lookup c ct of
+      Nothing -> False
+      Just cd -> isSubtype ct (cdSuper cd) d
+\end{minted}
+
+Note que \texttt{isSubtype ct c "Object"} é sempre
+\texttt{True} pelo segundo caso, o que reflecte o
+fato de que \texttt{Object} é a raiz da hierarquia.
+
+\subsection{Verificador de Tipos}
+
+O verificador segue diretamente as regras formais. Usamos a mônada
+\texttt{Except String} para propagar erros de tipo:
+
+\begin{minted}{haskell}
+type TcM a = Except String a
+type Env   = Map.Map VarName FJType
+
+tcExpr :: ClassTable -> Env -> Expr -> TcM FJType
+
+-- T-Var
+tcExpr _ env (EVar x) =
+  case Map.lookup x env of
+    Just t  -> return t
+    Nothing -> throwError $ "Unbound variable: " ++ x
+
+-- T-Field
+tcExpr ct env (EField e f) = do
+    FJType c <- tcExpr ct env e
+    case classFields ct c of
+      Nothing -> throwError $ "Unknown class: " ++ c
+      Just fs ->
+        case lookup f (map (\(t,fn) -> (fn,t)) fs) of
+          Just t  -> return t
+          Nothing -> throwError $
+            "Field '" ++ f ++ "' not found in class " ++ c
+
+-- T-Invk
+tcExpr ct env (EInvk e m args) = do
+    FJType c <- tcExpr ct env e
+    (paramTypes, retType) <-
+      maybe (throwError $ "Method '" ++ m ++ "' not found in " ++ c)
+            return
+            (mtype ct m c)
+    argTypes <- mapM (tcExpr ct env) args
+    forM_ (zip argTypes paramTypes) $ \(FJType got, FJType expected) ->
+      unless (isSubtype ct got expected) $
+        throwError $ "Argument type mismatch: '" ++ got ++
+                     "' is not a subtype of '" ++ expected ++ "'"
+    return retType
+
+-- T-New
+tcExpr ct env (ENew c args) = do
+    fs <- maybe (throwError $ "Unknown class: " ++ c)
+                return
+                (classFields ct c)
+    let expectedTypes = map fst fs
+    argTypes <- mapM (tcExpr ct env) args
+    forM_ (zip argTypes expectedTypes) $ \(FJType got, FJType expected) ->
+      unless (isSubtype ct got expected) $
+        throwError $ "Constructor argument type mismatch"
+    return (FJType c)
+
+-- T-UCast / T-DCast / T-SCast
+tcExpr ct env (ECast c e) = do
+    FJType _ <- tcExpr ct env e
+    return (FJType c)
+\end{minted}
+
+A regra de cast aceita todos os três casos (upcast, downcast, stupid
+cast), delegando a verificação dinâmica ao interpretador, tal como
+especificado pelas regras T-UCast, T-DCast e T-SCast.
+
+A verificação de métodos constrói o ambiente com
+\texttt{this} e os parâmetros, verifica o corpo e
+checa compatibilidade com eventuais overrides:
+
+\begin{minted}{haskell}
+tcMethod :: ClassTable -> ClassName -> MethodDecl -> TcM ()
+tcMethod ct c md = do
+    let env = Map.fromList $
+                ("this", FJType c) :
+                map (\(t, x) -> (x, t)) (mdParams md)
+    bodyType <- tcExpr ct env (mdBody md)
+    unless (isSubtype ct (unFJType bodyType) (unFJType (mdRetType md))) $
+      throwError $ "Return type mismatch in method '" ++ mdName md ++ "'"
+    case Map.lookup c ct >>= \cd -> mtype ct (mdName md) (cdSuper cd) of
+      Nothing -> return ()
+      Just (superParams, superRet) ->
+        unless (map fst (mdParams md) == superParams &&
+                mdRetType md == superRet) $
+          throwError $ "Override signature mismatch for '" ++ mdName md ++ "'"
+\end{minted}
+
+\subsection{Interpretador}
+
+Os únicos valores em FJ são objetos totalmente construídos:
+
+\begin{minted}{haskell}
+data FJValue = FJVal ClassName [FJValue]
+\end{minted}
+
+A substituição de variáveis percorre recursivamente a expressão:
+
+\begin{minted}{haskell}
+subst :: [(VarName, Expr)] -> Expr -> Expr
+subst env (EVar x) =
+  case lookup x env of
+    Just e  -> e
+    Nothing -> EVar x
+subst env (EField e f)   = EField (subst env e) f
+subst env (EInvk e m as) = EInvk (subst env e) m (map (subst env) as)
+subst env (ENew c as)    = ENew c (map (subst env) as)
+subst env (ECast c e)    = ECast c (subst env e)
+\end{minted}
+
+O núcleo do interpretador implementa as regras B-Field, B-Invk e B-Cast:
+
+\begin{minted}{haskell}
+eval :: ClassTable -> Expr -> EvalM FJValue
+
+-- B-New
+eval ct (ENew c args) = FJVal c <$> mapM (eval ct) args
+
+-- B-Field: localiza o índice do campo na lista plana
+eval ct (EField e f) = do
+    v@(FJVal c _) <- eval ct e
+    fs <- maybe (throwError $ "Unknown class: " ++ c)
+                return (classFields ct c)
+    case findIndex (\(_, fn) -> fn == f) fs of
+      Nothing -> throwError $ "Field '" ++ f ++ "' not found"
+      Just i  -> return (nthArg v i)
+  where nthArg (FJVal _ vs) i = vs !! i
+
+-- B-Invk: substitui this e parâmetros no corpo do método
+eval ct (EInvk e m args) = do
+    v@(FJVal c _) <- eval ct e
+    argVals <- mapM (eval ct) args
+    (params, body) <-
+      maybe (throwError $ "Method '" ++ m ++ "' not found")
+            return (mbody ct m c)
+    let env = ("this", valToExpr v) :
+              zip params (map valToExpr argVals)
+    eval ct (subst env body)
+
+-- B-Cast: verifica subtipagem em tempo de execução
+eval ct (ECast c e) = do
+    v@(FJVal d _) <- eval ct e
+    unless (isSubtype ct d c) $
+      throwError $ "ClassCastException: '" ++ d ++
+                   "' is not a subtype of '" ++ c ++ "'"
+    return v
+\end{minted}
+
+A função \texttt{valToExpr} converte um valor de
+volta a uma expressão \texttt{ENew} para que possa
+ser substituído em corpos de métodos:
+
+\begin{minted}{haskell}
+valToExpr :: FJValue -> Expr
+valToExpr (FJVal c args) = ENew c (map valToExpr args)
+\end{minted}
+
+\subsection{REPL}
+
+O executável \texttt{fj} oferece uma interface
+interativa para carregar classes e avaliar expressões:
+
+\begin{verbatim}
+Featherweight Java Interpreter
+  :load <file>   load class declarations from a FJ source file
+  :classes       list loaded classes
+  :debug         toggle debug output
+  :q             quit
+
+Type a FJ expression to type-check and evaluate it.
+\end{verbatim}
+
+Um exemplo de sessão com o arquivo \texttt{examples/pair.fj}:
+
+\begin{verbatim}
+FJ> :load examples/pair.fj
+Loaded 3 class(es): A B Pair
+FJ> new Pair(new A(), new B()).fst()
+type : Object
+--> new A()
+FJ> (A) new Pair(new A(), new B()).fst()
+type : A
+--> new A()
+FJ> new Pair(new A(), new B()).swap()
+type : Pair
+--> new Pair(new B(), new A())
+\end{verbatim}
+
+O comando \texttt{:debug} ativa a impressão da
+expressão após o parsing, o que é útil para inspecionar a estrutura
+da árvore sintática antes da avaliação.
+
+\section{Geração de Código Intermediário para FJ}
+
+O módulo \texttt{FJ.Backend.IR.FJCodegen} compila um programa FJ para
+a representação intermediária (IR) usada pelos capítulos anteriores.
+A função principal é:
+
+\begin{minted}{haskell}
+compileFJ :: Program -> Either String IR.Program
+\end{minted}
+
+Para cada programa FJ, o compilador gera quatro categorias de funções IR:
+\texttt{C\_new} (construtor de cada classe \(C\)),
+\texttt{C\_m\_m} (corpo de cada método \(m\) declarado em \(C\)),
+\texttt{dispatch\_m} (despacho dinâmico para cada nome de método \(m\)) e
+\texttt{main} (expressão principal do programa).
+
+\subsection{Layout de Objetos em Memória}
+
+Todo objeto FJ é representado como um bloco contíguo de palavras no heap:
+
+\[
+  \underbrace{\mathtt{class\_tag}}_{\text{offset } 0}
+  \mid
+  \underbrace{f_0}_{\text{offset } 8}
+  \mid
+  \underbrace{f_1}_{\text{offset } 16}
+  \mid \cdots \mid
+  \underbrace{f_n}_{\text{offset } (n{+}1) \cdot 8}
+\]
+
+A palavra na posição 0 guarda uma \emph{tag} inteira única atribuída a
+cada classe em tempo de compilação (\texttt{Object} recebe a tag 0).
+As palavras seguintes guardam os valores dos campos, incluindo os
+herdados, na mesma ordem em que \(\mathit{fields}(C)\) os retorna.
+Todos os valores são representados como inteiros de 8 bytes na IR
+(ponteiros ou escalares).
+
+O ambiente de compilação encapsula as três informações estáticas
+necessárias:
+
+\begin{minted}{haskell}
+data CgEnv = CgEnv
+  { cgClassTable :: ClassTable
+  , cgClassIds   :: Map.Map ClassName Int      -- classe → tag inteiro único
+  , cgTypeEnv    :: Map.Map VarName ClassName  -- variável local → tipo estático
+  }
+\end{minted}
+
+A mônada de geração de código acumula funções geradas e um bloco de
+instruções em construção:
+
+\begin{minted}{haskell}
+data CgState = CgState
+  { cgFuncs   :: [IR.FuncDef]
+  , cgStmts   :: [IR.Stmt]
+  , cgCounter :: Int
+  }
+
+type CgM a = StateT CgState (ExceptT String Identity) a
+\end{minted}
+
+A operação \texttt{inNewBlock} isola a geração de um bloco de
+instruções sem perturbar o bloco externo, o que é essencial para
+compilar o corpo de funções aninhadas:
+
+\begin{minted}{haskell}
+inNewBlock :: CgM () -> CgM [IR.Stmt]
+inNewBlock m = do
+  saved <- gets cgStmts
+  modify (\st -> st { cgStmts = [] })
+  m
+  stmts <- gets cgStmts
+  modify (\st -> st { cgStmts = saved })
+  return stmts
+\end{minted}
+
+\subsection{Construtores}
+
+Para cada classe \(C\) com \(n\) campos (incluindo herdados), o
+compilador gera a função \texttt{C\_new}:
+
+\begin{minted}{haskell}
+compileConstructor :: CgEnv -> ClassDecl -> CgM ()
+compileConstructor env cd = do
+    let c      = cdName cd
+        cid    = fromJust (Map.lookup c (cgClassIds env))
+        Just fs = classFields (cgClassTable env) c
+        n      = length fs
+        params = ["_p" ++ show i | i <- [0 .. n - 1]]
+    body <- inNewBlock $ do
+        objT <- fresh
+        emit $ IR.MOVE (IR.TEMP objT)
+                       (IR.CALL (IR.NAME "alloc") [IR.CONST (n + 1)])
+        emit $ IR.MOVE (IR.MEM (IR.TEMP objT)) (IR.CONST cid)
+        forM_ (zip [0..] params) $ \(i, p) ->
+            emit $ IR.MOVE
+                     (IR.MEM (IR.BINOP IR.BAdd (IR.TEMP objT)
+                                               (IR.CONST ((i + 1) * 8))))
+                     (IR.TEMP p)
+        emit $ IR.RETURN [IR.TEMP objT]
+    emitFunc (IR.FuncDef (c ++ "_new") params (foldStmts body))
+\end{minted}
+
+A função aloca \(n+1\) palavras (uma para a tag e \(n\) para os
+campos), escreve a tag na palavra 0 e, para cada campo \(i\), escreve
+o parâmetro \texttt{\_p}$i$ no offset \((i+1) \cdot 8\).
+
+\subsection{Métodos}
+
+Para um método \(m\) declarado na classe \(C\), o compilador gera a
+função \texttt{C\_m\_m}, onde o receptor é passado como primeiro
+parâmetro \texttt{\_this}:
+
+\begin{minted}{haskell}
+compileMethod :: CgEnv -> ClassName -> MethodDecl -> CgM ()
+compileMethod env c md = do
+    let m        = mdName md
+        pnames   = map snd (mdParams md)
+        ptypes   = map (unFJType . fst) (mdParams md)
+        typeEnv  = Map.fromList $ ("this", c) : zip pnames ptypes
+        env'     = withTypeEnv typeEnv env
+        irParams = "_this" : pnames
+    body <- inNewBlock $ do
+        emit $ IR.MOVE (IR.TEMP "this") (IR.TEMP "_this")
+        resT <- compileExpr env' (mdBody md)
+        emit $ IR.RETURN [IR.TEMP resT]
+    emitFunc (IR.FuncDef (c ++ "_m_" ++ m) irParams (foldStmts body))
+\end{minted}
+
+O \texttt{MOVE (TEMP "this") (TEMP "\_this")} expõe o receptor sob o
+nome \texttt{this} para que \texttt{EVar "this"} no corpo do método
+seja resolvido corretamente.
+
+\subsection{Despacho Dinâmico}
+
+FJ usa despacho dinâmico: o método executado depende do tipo dinâmico
+do receptor, não do tipo estático. O compilador gera uma função
+\texttt{dispatch\_m} para cada nome de método \(m\), que lê a tag do
+receptor e encadeia comparações para rotear a chamada:
+
+\begin{minted}{haskell}
+compileDispatch :: CgEnv -> MethodName -> CgM ()
+compileDispatch env m = do
+    let ct = cgClassTable env
+        definers = [md | cd <- Map.elems ct, md <- cdMethods cd, mdName md == m]
+    case definers of
+        [] -> return ()
+        (md : _) -> do
+            let arity    = length (mdParams md)
+                dpParams = ["_dp" ++ show i | i <- [0 .. arity - 1]]
+                irParams = "_recv" : dpParams
+                receivers = classesWithMethod ct m
+            body <- inNewBlock $ do
+                tagT <- fresh
+                emit $ IR.MOVE (IR.TEMP tagT) (IR.MEM (IR.TEMP "_recv"))
+                buildDispatchChain env m tagT dpParams receivers
+            emitFunc (IR.FuncDef ("dispatch_" ++ m) irParams (foldStmts body))
+\end{minted}
+
+A cadeia de despacho para cada classe receptora \(C\) compara a tag lida
+com a tag de \(C\) e, em caso de igualdade, realiza uma chamada de cauda
+à implementação correta do método:
+
+\begin{minted}{haskell}
+buildDispatchChain
+    :: CgEnv -> MethodName -> IR.Temp -> [IR.Temp] -> [ClassName] -> CgM ()
+buildDispatchChain _   _ _    _      []     =
+    emit $ IR.RETURN [IR.CONST 0]   -- inalcançável em programas bem tipados
+buildDispatchChain env m tagT dpParams (c : cs) = do
+    let impl = fromJust (implementorOf ct m c)
+        fn   = impl ++ "_m_" ++ m
+        callArgs = map IR.TEMP ("_recv" : dpParams)
+    okL   <- freshLabel
+    nextL <- freshLabel
+    emit $ IR.CJUMP (IR.BINOP IR.BEq (IR.TEMP tagT) (IR.CONST cid)) okL nextL
+    emit $ IR.LABEL okL
+    emit $ IR.RETURN [IR.CALL (IR.NAME fn) callArgs]
+    emit $ IR.LABEL nextL
+    buildDispatchChain env m tagT dpParams cs
+  where
+    ct  = cgClassTable env
+    cid = fromJust (Map.lookup c (cgClassIds env))
+\end{minted}
+
+A função \texttt{implementorOf} percorre a hierarquia de herança para
+encontrar a classe que define diretamente o método \(m\) para
+objetos de classe \(C\):
+
+\begin{minted}{haskell}
+implementorOf :: ClassTable -> MethodName -> ClassName -> Maybe ClassName
+implementorOf _  _ "Object" = Nothing
+implementorOf ct m c =
+    case Map.lookup c ct of
+        Nothing -> Nothing
+        Just cd ->
+            if any (\md -> mdName md == m) (cdMethods cd)
+                then Just c
+                else implementorOf ct m (cdSuper cd)
+\end{minted}
+
+\subsection{Verificação de Cast}
+
+Para a expressão \texttt{(D) e}, o compilador lê a tag do objeto
+resultante e verifica se ela pertence ao conjunto de tags de classes
+que são subtipos de \(D\):
+
+\begin{minted}{haskell}
+compileExpr env (ECast d e) = do
+    ptrT <- compileExpr env e
+    let ct       = cgClassTable env
+        ids      = cgClassIds env
+        validIds = [i | (cn, i) <- Map.toList ids, isSubtype ct cn d]
+    okL   <- freshLabel
+    failL <- freshLabel
+    tagT  <- fresh
+    emit $ IR.MOVE (IR.TEMP tagT) (IR.MEM (IR.TEMP ptrT))
+    emit $ IR.CJUMP (buildOrChain (IR.TEMP tagT) validIds) okL failL
+    emit $ IR.LABEL failL
+    emit $ IR.EXP (IR.CALL (IR.NAME "print") [IR.CONST (-1)])
+    emit $ IR.RETURN [IR.CONST 0]
+    emit $ IR.LABEL okL
+    return ptrT
+\end{minted}
+
+A função auxiliar \texttt{buildOrChain} constrói uma disjunção de
+igualdades de tag para a verificação de subtipagem em tempo de execução:
+
+\begin{minted}{haskell}
+buildOrChain :: IR.Expr -> [Int] -> IR.Expr
+buildOrChain _   []     = IR.CONST 0
+buildOrChain tag [i]    = IR.BINOP IR.BEq tag (IR.CONST i)
+buildOrChain tag (i:is) =
+    IR.BINOP IR.BOr
+             (IR.BINOP IR.BEq tag (IR.CONST i))
+             (buildOrChain tag is)
+\end{minted}
+
+Em caso de falha, o compilador emite \texttt{print(-1)} (sinaliza
+\texttt{ClassCastException}) e retorna 0. Em caso de sucesso, retorna
+o ponteiro original intacto.
+
+\subsection{Compilação de Expressões}
+
+A função \texttt{compileExpr} compila cada expressão FJ para um
+temporário IR que contém o seu valor:
+
+\begin{minted}{haskell}
+compileExpr :: CgEnv -> Expr -> CgM IR.Temp
+
+-- EVar: o nome já é um temporário (parâmetros, "this", variáveis locais)
+compileExpr _ (EVar x) = return x
+
+-- ENew: chama o construtor
+compileExpr env (ENew c args) = do
+    argTs <- mapM (compileExpr env) args
+    t <- fresh
+    emit $ IR.MOVE (IR.TEMP t)
+                   (IR.CALL (IR.NAME (c ++ "_new")) (map IR.TEMP argTs))
+    return t
+
+-- EField: lê a palavra no offset do campo
+compileExpr env (EField e f) = do
+    ptrT <- compileExpr env e
+    let idx    = fromJust (findIndex (\(_, fn) -> fn == f) fs)
+        offset = (idx + 1) * 8
+    t <- fresh
+    emit $ IR.MOVE (IR.TEMP t)
+                   (IR.MEM (IR.BINOP IR.BAdd (IR.TEMP ptrT) (IR.CONST offset)))
+    return t
+
+-- EInvk: chama a função de despacho dinâmico
+compileExpr env (EInvk e m args) = do
+    recvT <- compileExpr env e
+    argTs <- mapM (compileExpr env) args
+    t <- fresh
+    emit $ IR.MOVE (IR.TEMP t)
+                   (IR.CALL (IR.NAME ("dispatch_" ++ m))
+                             (map IR.TEMP (recvT : argTs)))
+    return t
+\end{minted}
+
+Para o acesso a campo, o tipo estático do receptor é reconstruído via
+\texttt{typeOfExpr}, que percorre o ambiente local e a tabela de
+classes para determinar a classe do receptor e, a partir dela, o
+índice do campo \(f\) na lista plana \(\mathit{fields}(C)\).
+
+\section{Conclusão}
+
+A subtipagem é o mecanismo que reconcilia rigor formal e flexibilidade
+prática em sistemas de tipos orientados a objetos. A relação \(S <: T\),
+formalizada como uma pré-ordem compatível com a estrutura dos tipos,
+captura o princípio de substituição de Liskov: qualquer contexto que
+espera um valor de tipo \(T\) aceita silenciosamente um valor de tipo
+\(S\). A regra de subsunção \textbf{T-Sub} é o mecanismo pelo qual essa
+compatibilidade é injetada no sistema de tipos, e a contravariância no
+domínio de tipos função é a consequência inevitável de se tratar funções
+como contratos bidirecionais entre produtor e consumidor.
+
+O Featherweight Java demonstra que esses princípios se aplicam
+igualmente à subtipagem por herança de classes. Com apenas cinco formas
+de expressão (variável, acesso a campo, invocação de método, criação
+de objeto e cast), FJ captura o núcleo formal de Java com precisão
+suficiente para demonstrar progresso e preservação. A ressalva do
+progresso é reveladora: bem-tipicidade não impede \emph{downcasts}
+inválidos de falhar em tempo de execução, o que reflete com fidelidade
+o comportamento real de Java. A preservação, por sua vez, enuncia uma
+versão enfraquecida da invariante de tipo: o tipo do resultado pode ser
+um \emph{subtipo} do tipo original, pois um downcast bem-sucedido
+refina a informação disponível sobre o objeto.
+
+A implementação Haskell evidencia a correspondência sistemática entre
+especificação formal e código. A tabela de classes é uma função de
+consulta que realiza computacionalmente as metafunções
+\(\mathit{fields}\), \(\mathit{mtype}\) e \(\mathit{mbody}\) da teoria;
+o verificador de tipos é uma transliteração direta das regras de
+derivação; e o interpretador implementa as regras de redução B-Field,
+B-Invk e B-Cast quase literalmente, com \texttt{subst} realizando a
+substituição simultânea de variáveis especificada na regra B-Invk.
+
+O compilador FJ para representação intermediária fecha o ciclo entre
+teoria e geração de código. A escolha de representar objetos como blocos
+lineares de palavras com uma \emph{tag} de classe na posição zero é
+simultaneamente a mais simples e a mais eficiente: acesso a campos é uma
+aritmética de ponteiros; despacho dinâmico é uma leitura de tag seguida
+de uma cadeia de comparações; e verificação de cast é uma disjunção de
+igualdades de tag. Essa representação é, em essência, a mesma usada por
+implementações industriais de Java e C++. A função
+\texttt{compileFJ} organiza a geração em quatro passagens independentes
+(construtores, métodos, funções de despacho e \texttt{main}), o que
+reflete a modularidade da própria teoria de FJ e facilita a verificação
+de correção de cada fase isoladamente.

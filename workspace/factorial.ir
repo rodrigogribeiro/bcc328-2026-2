@@ -1,0 +1,26 @@
+func factorial(n) {
+  SEQ(CJUMP(BINOP(EQ, TEMP(n), CONST(0)), if_true_0, if_false_1),
+        SEQ(LABEL(if_true_0),
+              SEQ(RETURN(CONST(1)),
+                    SEQ(LABEL(if_false_1),
+                          SEQ(RETURN(BINOP(MUL, TEMP(n), CALL(NAME(factorial), BINOP(SUB, TEMP(n), CONST(1))))),
+                                LABEL(if_end_2))))))
+}
+func main() {
+  SEQ(MOVE(TEMP(n), CALL(NAME(read_int))),
+        SEQ(EXP(CALL(NAME(print), CALL(NAME(factorial), TEMP(n)))),
+              EXP(CALL(NAME(print), ESEQ(SEQ(MOVE(TEMP(n_il0), TEMP(n)),
+                                               SEQ(SEQ(MOVE(TEMP(result_il0), CONST(1)),
+                                                         SEQ(MOVE(TEMP(i_il0), TEMP(n_il0)),
+                                                               SEQ(LABEL(while_head_0_il0),
+                                                                     SEQ(CJUMP(BINOP(GT, TEMP(i_il0), CONST(0)), while_body_1_il0, while_exit_2_il0),
+                                                                           SEQ(LABEL(while_body_1_il0),
+                                                                                 SEQ(MOVE(TEMP(result_il0), TEMP(i_il0)),
+                                                                                       SEQ(MOVE(TEMP(i_il0), BINOP(SUB, TEMP(i_il0), CONST(1))),
+                                                                                             SEQ(JUMP(NAME(while_head_0_il0)),
+                                                                                                   SEQ(LABEL(while_exit_2_il0),
+                                                                                                         SEQ(MOVE(TEMP(_il_ret_il0), TEMP(result_il0)),
+                                                                                                               JUMP(NAME(L_il_exit_il0)))))))))))),
+                                                     LABEL(L_il_exit_il0))),
+                                           TEMP(_il_ret_il0))))))
+}

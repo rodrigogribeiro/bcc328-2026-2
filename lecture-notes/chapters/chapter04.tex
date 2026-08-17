@@ -1,0 +1,226 @@
+\chapter{Geradores de analisadores léxicos}
+
+\section{Introdução}
+
+Neste capítulo, veremos como utilizar um gerador para construir um
+analisador léxico a partir de uma especificação. Em Haskell, o
+gerador de analisadores mais popular é o Alex. Este capítulo
+apresenta uma introdução ao uso do Alex em um exemplo prático: a
+construção do analisador léxico para uma linguagem de expressões.
+
+O código discutido neste capítulo esta disponível em
+\begin{center}
+  \verb|Exp/Frontend/Lexer/Alex/ExpLexer.x|
+\end{center}
+
+\section{Construindo um analisador léxico utilizando o Alex}
+
+Nesta seção vamos apresentar a especificação de um analisador léxico
+utilizando a linguagem do Alex. Primeiro, vamos definir um tipo para
+representação de tokens e, em seguida, descreveremos a especificação
+do analisador e como este pode ser criado utilizando o Alex.
+
+\subsection{Definindo os tokens}
+
+Antes de criar o lexer, precisamos definir o que é um \textbf{token}
+na nossa linguagem de expressões. Os tipos a seguir apresentam a
+definição de token que utilizaremos.
+
+\begin{minted}{haskell}
+data Token = Token {
+      pos    :: (Int, Int) -- (Linha, Coluna)
+    , lexeme :: Lexeme
+    } deriving (Eq, Show)
+
+data Lexeme
+  = TNumber Int | TLParen | TRParen | TPlus | TTimes | TEOF
+  deriving (Eq, Show)
+\end{minted}
+
+O tipo \haskell{Lexeme} representa as diferentes
+categorias de tokens presentes na linguagem: números, abre e fecha
+parêntesis, adição, multiplicação e um valor especial para fim da
+entrada (\haskell{EOF}). Um token é formado por um
+\haskell{Lexeme} e um par de inteiros que representam
+a linha e coluna inicial daquele token na entrada.
+
+\subsection{Sintaxe de expressões regulares no Alex}
+
+Alex usa expressões regulares para definir padrões. A seguir, vamos
+apresentar alguns exemplos de expressões que são utilizadas na
+especificação léxica de linguagens.
+
+A sintaxe \verb|[0-9]| denota que qualquer
+caractere numérico entre 0 e 9 (inclusive) será aceito. Da mesma
+forma, \verb|[a-zA-Z]| denota uma expressão para
+qualquer caractere minúsculo ou maiúsculo. Caracteres também podem
+ser excluídos; por exemplo, \verb|[\^\\"]| é
+entendido como ``qualquer coisa, exceto aspas duplas''.
+
+O operador Kleene denota que uma expressão pode ser casada zero ou
+mais vezes com a entrada. Da mesma forma, o fecho positivo,
+\verb|+| denota que uma expressão pode ser casada
+uma ou mais vezes. Por exemplo, \verb|[0-9]+|
+aceita a palavra 1234, pois denota uma sequência formada por um ou
+mais dígitos. Outro operador comum é \verb|?| que
+significa que uma expressão pode ser casada opcionalmente, isto é,
+zero ou uma vez.
+
+Um ponto, \verb|.|, casa com qualquer caractere
+diferente de quebra de linha. Uma string entre aspas duplas, como
+``>='', corresponderá exatamente à string dentro das
+aspas. Um caractere de escape, como \verb|\n|, corresponderá exatamente a
+esse caractere.
+
+Você pode agrupar expressões regulares concatenando-as.
+Ao concatenar expressões
+regulares, como em \verb|[a-z][A-Za-z0-9]*|,
+significa que o Alex deve corresponder a cada conjunto de strings em
+sequência. Um exemplo de lexema que pode ser aceita por essa
+expressão regular é \verb|myVariable1|.
+
+O operador de barra vertical, \verb|||, indica que o Alex pode
+alternar entre opções, como
+
+\begin{verbatim}
+0(x[0-9a-fA-F]+ | o[0-7]+)
+\end{verbatim}
+
+que é uma expressão regular que pode corresponder a números
+hexadecimais ou octais.
+
+\subsection{Estrutura de especificações Alex}
+
+A estrutura de um arquivo de especificação Alex (com extensão .x) é
+dividida em quatro seções principais. O arquivo inicia com um bloco
+de código Haskell, delimitado por chaves $\{ \ldots{} \}$, onde são
+inseridos o nome do módulo e as importações necessárias. No exemplo,
+\verb|ExpLexer.x|, temos o seguinte bloco inicial:
+
+\begin{minted}{haskell}
+{
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
+module Exp.Frontend.Lexer.Alex.ExpLexer where
+
+import Control.Monad
+import Exp.Frontend.Lexer.Token
+}
+\end{minted}
+
+Logo abaixo, encontram-se as definições de macros e diretivas de
+configuração, como o \verb|%wrapper|, que instrui o Alex sobre qual o
+``template'' de analisador léxico deve ser gerado.
+
+\begin{verbatim}
+%wrapper "monadUserState"
+
+$digit = 0-9
+@number     = $digit+
+\end{verbatim}
+
+O Alex suporta dois tipos de macros para facilitar a escrita de
+expressões regulares: os conjuntos de caracteres (como
+\verb|$digit|), que representam classes de
+caracteres, e as macros de expressões regulares (como
+\verb|@number|), que funcionam como atalhos para
+padrões mais complexos. Quanto à infraestrutura de código gerada, o
+Alex utiliza wrappers que definem a interface do lexer; os mais
+comuns incluem o \textbf{basic}, que processa uma String de forma
+simples, o \textbf{posn}, que adiciona automaticamente informações de
+linha e coluna, e o \textbf{monadUserState}, que permite a execução
+dentro de uma mônada para manipulação de estados complexos. A
+principal diferença entre eles reside no controle: enquanto os
+wrappers simples são puramente funcionais e diretos, o wrapper
+\textbf{monadUserState} (utilizado no exemplo) oferece maior
+flexibilidade ao permitir que o desenvolvedor armazene dados
+personalizados, como o nível de aninhamento de comentários,
+diretamente no estado do analisador.
+
+A especificação léxica é inicializada pelo símbolo
+\verb|tokens :-| e contém as regras de tradução
+que associam expressões regulares a ações específicas em Haskell, que
+podem ser utilizadas para criação de tokens da linguagem. A seguir,
+apresentamos a especificação para a linguagem de expressões.
+
+\begin{verbatim}
+tokens :-
+      -- whitespace and line comments
+      <0> $white+       ;
+      <0> "//" .*       ;
+      -- other tokens
+      <0> @number       {mkNumber}
+      <0> "("           {simpleToken TLParen}
+      <0> ")"           {simpleToken TRParen}
+      <0> "+"           {simpleToken TPlus}
+      <0> "*"           {simpleToken TTimes}
+      -- multi-line comment
+      <0> "\*"              { nestComment `andBegin` state_comment }
+      <0> "*/"              {\ _ _ -> alexError "Error! Unexpected close comment!" }
+      <state_comment> "\*"  { nestComment }
+      <state_comment> "*/"  { unnestComment }
+      <state_comment> .     ;
+      <state_comment> \n    ;
+\end{verbatim}
+
+O código anterior define as regras de reconhecimento para cada
+elemento da linguagem, utilizando \textbf{start codes} para alternar
+entre o processamento normal e o de comentários. No estado inicial
+\verb|<0>|, o analisador ignora espaços em branco
+(\verb|$white+|) e comentários de linha (começam
+com \verb|//|). Para tokens significativos como
+números (\verb|@number|), parênteses e operadores,
+o Alex executa ações Haskell como \verb|mkNumber|
+ou \verb|simpleToken|, que geram os tokens correspondentes. Caso o
+analisador encontre um token para fechar um comentário,
+\verb|*/| enquanto ainda está no estado inicial,
+ele dispara um erro imediato, pois não há um bloco aberto para ser fechado.
+
+A transição para o estado de comentários multilinha ocorre quando o
+padrão \verb|\\*| é identificado no estado
+\verb|<0>|, acionando a função
+\verb|nestComment| e mudando o estado para
+\verb|state_comment| através da função
+\verb|andBegin|. Uma vez dentro do estado
+\verb|state_comment|, o léxico ignora caracteres
+genéricos (usando \verb|.|) e quebras de linha
+(\verb|\\n|), mas permanece atento a novos
+símbolos de abertura ou fechamento de blocos de comentário. O uso de
+\verb|nestComment| e
+\verb|unnestComment| dentro desse estado permite
+que o analisador incremente ou decremente um contador de nível de
+aninhamento. Somente quando o nível de aninhamento retorna a zero é
+que a função unnestComment retorna para o estado
+\verb|<0>|, permitindo que a análise continue normalmente.
+
+Em especificações Alex, quando utilizamos o wrapper
+\verb|monadUserState|, ganhamos a capacidade de
+carregar um estado personalizado durante toda a análise, definido
+pelo tipo \verb|AlexUserState|. No exemplo, esse
+tipo contém apenas o campo \verb|nestLevel| para
+rastrear o nível de blocos de comentários aninhados. Para definir o
+estado inicial, devemos codificar a função
+\verb|alexInitUserState| que inicializa esse
+contador de nível de comentários em zero.
+
+A manipulação desse estado ocorre através de três funções
+fundamentais: \verb|get|,
+\verb|put| e \verb|modify|. A
+função \verb|get| extrai o estado atual de dentro
+da mônada Alex, enquanto \verb|put| sobrescreve o
+estado existente por um novo. Já a função
+\verb|modify| aplica uma transformação direta ao
+estado. Por exemplo, na função \verb|nestComment|,
+\verb|modify| é usada para incrementar o nível de
+comentário de forma concisa.
+
+\section{Conclusão}
+
+Este capítulo apresentou como usar o gerador de analisadores léxicos
+para Haskell, Alex. Apresentamos a definição de tokens, como tipos de
+dados Haskell. Utilizando a linguagem de especificação do Alex,
+definimos quais padrões (definidos como expressões regulares) e quais
+tokens são associados a eles. Apresentamos os conceitos de wrappers e
+como estados podem ser utilizados para modificar o comportamento do
+analisador léxico. Mostramos como esse mecanismo é utilizado para
+descartar comentários em bloco. Com isso, temos a base necessária
+para a próxima fase do compiladores: a análise sintática.

@@ -1,0 +1,506 @@
+\chapter{Arquitetura e Canonicalização}\label{chap:x86-arch}
+
+\section{Introdução}
+
+Os capítulos anteriores mostraram como a representação intermediária (IRT)
+pode ser traduzida para linguagens de alto nível como C e WebAssembly, nas
+quais outro compilador ou motor de execução cuida da alocação de
+registradores e da emissão de instruções de máquina. Neste capítulo
+iniciamos a geração de código nativo: a tradução direta de IRT para
+instruções X86-64. Ao contrário das estratégias anteriores, aqui o
+compilador assume responsabilidade completa por cada detalhe da execução:
+escolha de registradores, layout do frame de ativação e cumprimento da
+convenção de chamada (ABI) do sistema operacional.
+
+A motivação é dupla. Do ponto de vista prático, a geração de código nativo
+é a rota obrigatória quando se quer eliminar dependências de ferramentas
+externas e obter controle total sobre o desempenho. Do ponto de vista
+pedagógico, implementar um back-end X86-64 força o compilador a lidar com
+problemas que surgem em qualquer gerador de código real: temporários em
+número maior do que os registradores disponíveis, aliasing de memória,
+alinhamento de pilha e convenções de ABI. Esses problemas são encobertos
+pelas estratégias de transpilação, mas aparecem explicitamente quando se gera
+assembly.
+
+O pipeline X86-64 acrescenta três fases ao compilador:
+
+\begin{enumerate}
+  \item \textbf{Canonicalização}: elimina nós \texttt{ESEQ} da IRT, tornando
+    cada instrução um enunciado de topo de nível e permitindo análise de
+    fluxo de controle linear.
+  \item \textbf{Alocação de registradores}: atribui a cada temporário da IRT
+    um registrador físico ou um slot na pilha, usando análise de vivacidade e
+    coloração de grafos.
+  \item \textbf{Seleção de instruções}: traduz cada enunciado IRT para uma
+    sequência concreta de instruções X86-64 de 64 bits, respeitando as
+    restrições de ABI e alinhamento.
+\end{enumerate}
+
+Este capítulo cobre a arquitetura X86-64 e a fase de canonicalização.
+
+\section{A Arquitetura X86-64}
+
+\subsection{Registradores}
+
+O X86-64 possui 16 registradores de propósito geral de 64 bits:
+\texttt{rax}, \texttt{rbx}, \texttt{rcx}, \texttt{rdx}, \texttt{rsi},
+\texttt{rdi}, \texttt{rbp}, \texttt{rsp} e \texttt{r8}–\texttt{r15}.
+Para os fins deste compilador, dividimos os registradores em quatro grupos
+com papéis fixos:
+
+\medskip
+\noindent
+\textbf{Registradores reservados pelo gerador de código}:
+
+\begin{center}
+  \begin{tabular}{ll}
+    \toprule
+    Registrador & Papel \\
+    \midrule
+    \texttt{\%rax} & Acumulador: resultado de toda expressão e valor
+    de retorno de função \\
+    \texttt{\%rdx} & Extensão de sinal (\texttt{cqo}) e resto de
+    divisão (\texttt{idivq}) \\
+    \texttt{\%r10} & Scratch de endereço na instrução
+    \texttt{MOVE(MEM\,\_,\,\_)} \\
+    \texttt{\%r11} & Scratch do primeiro operando durante a
+    compilação de \texttt{BINOP} \\
+    \texttt{\%rbp} & Ponteiro de frame \\
+    \texttt{\%rsp} & Ponteiro de pilha \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\medskip
+\noindent
+\textbf{Pool de alocação} ($k = 10$ registradores disponíveis ao coloridor):
+
+\begin{center}
+  \texttt{\%rbx \quad \%rcx \quad \%rsi \quad \%rdi \quad \%r8 \quad \%r9
+  \quad \%r12 \quad \%r13 \quad \%r14 \quad \%r15}
+\end{center}
+
+\medskip
+\noindent
+\textbf{Caller-saved} (clobberados por qualquer \texttt{callq}):
+\texttt{\%rax}, \texttt{\%rcx}, \texttt{\%rdx}, \texttt{\%rsi},
+\texttt{\%rdi}, \texttt{\%r8}–\texttt{\%r11}.
+
+\medskip
+\noindent
+\textbf{Callee-saved} (o chamado deve preservá-los):
+\texttt{\%rbx}, \texttt{\%r12}–\texttt{\%r15}.
+
+A distinção caller/callee-saved afeta diretamente a alocação: temporários
+que precisam sobreviver a uma chamada de função só podem ser atribuídos a
+registradores callee-saved (ou derramados na pilha).
+
+\subsection{Sintaxe AT\&T}
+
+O compilador gera assembly em \emph{sintaxe AT\&T}, usada pelo GAS
+(\textit{GNU Assembler}). As convenções essenciais são:
+
+\begin{itemize}
+  \item Registradores têm prefixo \texttt{\%}: \texttt{\%rax}, \texttt{\%rdi}.
+  \item Imediatos têm prefixo \texttt{\$}: \texttt{\$42}, \texttt{\$-1}.
+  \item A instrução \texttt{movq src, dst} segue a ordem
+    \emph{origem $\to$ destino} (oposto da sintaxe Intel).
+  \item Sufixo \texttt{q} indica operandos de 64 bits (\textit{quad word}).
+  \item Endereçamento indireto: \texttt{-8(\%rbp)} = memória no endereço
+    $\texttt{\%rbp} - 8$.
+  \item Endereçamento RIP-relativo: \texttt{label(\%rip)} para acessar
+    dados em \texttt{.rodata} ou \texttt{.bss} de forma independente de
+    posição (\textit{position-independent code}).
+\end{itemize}
+
+\subsection{Convenção de Chamada (ABI System V AMD64)}
+
+O ABI usado no Linux x86-64 define:
+
+\begin{itemize}
+  \item Os primeiros seis argumentos inteiros/ponteiro são passados nos
+    registradores \texttt{\%rdi}, \texttt{\%rsi}, \texttt{\%rdx},
+    \texttt{\%rcx}, \texttt{\%r8}, \texttt{\%r9}. Argumentos adicionais
+    vão para a pilha.
+  \item O valor de retorno inteiro fica em \texttt{\%rax}.
+  \item O registrador \texttt{\%rax} deve ser zero para chamadas a funções
+    variádicas como \texttt{printf}.
+  \item \textbf{RSP deve ser múltiplo de 16 bytes no momento do
+    \texttt{callq}}. A instrução \texttt{callq} em si empilha o endereço de
+    retorno (8 bytes), portanto no início de uma função recém-chamada RSP é
+    múltiplo de 8 mas não de 16.
+\end{itemize}
+
+\subsection{Sintaxe Abstrata X86-64 em Haskell}
+
+O módulo \texttt{IR.Backend.X86.X86Syntax} define os tipos Haskell que
+representam o subconjunto de instruções X86-64 gerado pelo compilador:
+
+\begin{minted}{haskell}
+data Reg
+  = RAX | RBX | RCX | RDX | RSI | RDI
+  | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
+  | RBP | RSP
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+data Cc = E | NE | L | LE | G | GE
+  deriving (Eq, Ord, Show)
+
+data Operand
+  = Imm    Int        -- $n
+  | Reg    Reg        -- %reg
+  | AL                -- %al  (destino de Setcc)
+  | Mem    Int Reg    -- n(%reg)
+  | RipRel String     -- label(%rip)
+  deriving (Eq, Show)
+
+data Instr
+  = Movq    Operand Operand   -- movq  src, dst
+  | Movzbq  Operand Operand   -- movzbq src, dst  (zero-extend byte → quad)
+  | Leaq    Operand Operand   -- leaq  src, dst
+  | Addq    Operand Operand   -- addq  src, dst   (dst += src)
+  | Subq    Operand Operand   -- subq  src, dst   (dst -= src)
+  | Imulq   Operand Operand   -- imulq src, dst   (dst *= src, com sinal)
+  | Idivq   Operand           -- idivq src        (rdx:rax / src)
+  | Cqo                       -- cqo   (sign-extend rax -> rdx:rax)
+  | Negq    Operand           -- negq  dst        (dst = -dst)
+  | Andq    Operand Operand   -- andq  src, dst
+  | Orq     Operand Operand   -- orq   src, dst
+  | Xorq    Operand Operand   -- xorq  src, dst
+  | Cmpq    Operand Operand   -- cmpq  src, dst   (flags = dst - src)
+  | Testq   Operand Operand   -- testq src, dst   (flags = dst & src)
+  | Setcc   Cc Operand        -- setX  dst        (%al)
+  | Pushq   Operand           -- pushq src
+  | Popq    Operand           -- popq  dst
+  | Callq   String            -- callq label
+  | Retq                      -- retq
+  | Jmp     String            -- jmp   label
+  | Jcc     Cc String         -- jXX   label
+  | GlobLabel String          -- nome: (entrada de função pública)
+  | LocLabel  String          -- .L_nome: (rótulo local de fluxo)
+  | Dir       String          -- diretiva verbatim
+  deriving (Eq, Show)
+\end{minted}
+
+\section{Canonicalização da IRT}
+
+\subsection{Motivação}
+
+A representação IRT permite que expressões contenham efeitos colaterais
+via o construtor \texttt{ESEQ(s, e)}, que executa o enunciado $s$ e
+depois avalia a expressão $e$. Isso é conveniente durante a geração da
+IRT, mas cria um problema fundamental para as fases seguintes:
+
+\begin{itemize}
+  \item A análise de vivacidade opera sobre um CFG (\emph{control-flow
+    graph}) cujos nós são enunciados lineares. O nó \texttt{ESEQ}
+    esconde enunciados dentro de expressões, tornando-os invisíveis ao
+    construtor de CFG.
+  \item A seleção de instruções supõe que cada nó da IRT seja ou um
+    enunciado puro ou uma expressão pura, sem efeitos aninhados em
+    posições de expressão.
+\end{itemize}
+
+A \textbf{canonicalização} resolve isso eliminando todos os nós
+\texttt{ESEQ}: cada enunciado oculto é \emph{içado} para o topo da
+sequência de enunciados, deixando para trás apenas uma expressão pura.
+
+\subsection{Semântica Formal}
+
+Definimos a canonicalização por meio de dois julgamentos:
+
+\begin{itemize}
+  \item $\mathit{pull}(e) = (\vec{s}, e')$: a expressão $e$ é
+    transformada na sequência de enunciados $\vec{s}$ seguida da
+    expressão pura $e'$.
+  \item $\mathit{canon}(s) = \vec{s}$: o enunciado $s$ é transformado
+    na sequência de enunciados $\vec{s}$, todos sem \texttt{ESEQ}.
+\end{itemize}
+
+As regras para $\mathit{pull}$ são:
+
+\[
+  \infer[\text{Pull-Const}]{\mathit{pull}(\texttt{CONST}(n)) = ([],
+  \texttt{CONST}(n))}{}
+  \qquad
+  \infer[\text{Pull-Temp}]{\mathit{pull}(\texttt{TEMP}(t)) = ([],
+  \texttt{TEMP}(t))}{}
+\]
+
+\[
+  \infer[\text{Pull-Name}]{\mathit{pull}(\texttt{NAME}(l)) = ([],
+  \texttt{NAME}(l))}{}
+\]
+
+\[
+  \infer[\text{Pull-ESeq}]
+  {\mathit{pull}(\texttt{ESEQ}(s, e)) = (\mathit{canon}(s)
+  \mathbin{+\!\!+} \vec{s},\; e')}
+  {\mathit{pull}(e) = (\vec{s}, e')}
+\]
+
+\[
+  \infer[\text{Pull-Binop}]
+  {\mathit{pull}(\texttt{BINOP}(\oplus, e_1, e_2)) =
+  (\vec{s_1} \mathbin{+\!\!+} \vec{s_2},\; \texttt{BINOP}(\oplus, e_1', e_2'))}
+  {\mathit{pull}(e_1) = (\vec{s_1}, e_1') \quad \mathit{pull}(e_2) =
+  (\vec{s_2}, e_2')}
+\]
+
+\[
+  \infer[\text{Pull-Mem}]
+  {\mathit{pull}(\texttt{MEM}(e)) = (\vec{s},\; \texttt{MEM}(e'))}
+  {\mathit{pull}(e) = (\vec{s}, e')}
+\]
+
+\[
+  \infer[\text{Pull-Call}]
+  {\mathit{pull}(\texttt{CALL}(f, [a_1, \ldots, a_n])) =
+    (\vec{s_f} \mathbin{+\!\!+} \vec{s_1} \mathbin{+\!\!+} \cdots
+      \mathbin{+\!\!+} \vec{s_n},\;
+  \texttt{CALL}(f', [a_1', \ldots, a_n']))}
+  {\mathit{pull}(f) = (\vec{s_f}, f') \quad \mathit{pull}(a_i) =
+  (\vec{s_i}, a_i')}
+\]
+
+As regras para $\mathit{canon}$ transformam enunciados:
+
+\[
+  \infer[\text{Canon-Label}]{\mathit{canon}(\texttt{LABEL}(l)) =
+  [\texttt{LABEL}(l)]}{}
+\]
+
+\[
+  \infer[\text{Canon-Seq}]{\mathit{canon}(\texttt{SEQ}(s_1, s_2)) =
+  \mathit{canon}(s_1) \mathbin{+\!\!+} \mathit{canon}(s_2)}{}
+\]
+
+\[
+  \infer[\text{Canon-Move}]
+  {\mathit{canon}(\texttt{MOVE}(\texttt{TEMP}(t), e)) =
+  \vec{s} \mathbin{+\!\!+} [\texttt{MOVE}(\texttt{TEMP}(t), e')]}
+  {\mathit{pull}(e) = (\vec{s}, e')}
+\]
+
+\[
+  \infer[\text{Canon-MoveMem}]
+  {\mathit{canon}(\texttt{MOVE}(\texttt{MEM}(a), v)) =
+    \vec{s_1} \mathbin{+\!\!+} \vec{s_2} \mathbin{+\!\!+}
+  [\texttt{MOVE}(\texttt{MEM}(a'), v')]}
+  {\mathit{pull}(a) = (\vec{s_1}, a') \quad \mathit{pull}(v) = (\vec{s_2}, v')}
+\]
+
+\[
+  \infer[\text{Canon-Exp}]
+  {\mathit{canon}(\texttt{EXP}(e)) = \vec{s} \mathbin{+\!\!+}
+  [\texttt{EXP}(e')]}
+  {\mathit{pull}(e) = (\vec{s}, e')}
+\]
+
+\[
+  \infer[\text{Canon-CJump}]
+  {\mathit{canon}(\texttt{CJUMP}(e, l_t, l_f)) =
+  \vec{s} \mathbin{+\!\!+} [\texttt{CJUMP}(e', l_t, l_f)]}
+  {\mathit{pull}(e) = (\vec{s}, e')}
+\]
+
+\[
+  \infer[\text{Canon-Jump}]
+  {\mathit{canon}(\texttt{JUMP}(\texttt{NAME}(l))) =
+  [\texttt{JUMP}(\texttt{NAME}(l))]}{}
+\]
+
+\[
+  \infer[\text{Canon-Return}]
+  {\mathit{canon}(\texttt{RETURN}([e_1, \ldots, e_n])) =
+    \vec{s_1} \mathbin{+\!\!+} \cdots \mathbin{+\!\!+} \vec{s_n}
+    \mathbin{+\!\!+}
+  [\texttt{RETURN}([e_1', \ldots, e_n'])]}
+  {\mathit{pull}(e_i) = (\vec{s_i}, e_i')\; \forall i}
+\]
+
+\begin{remark}
+  A regra Pull-Binop pressupõe que $e_1$ e $e_2$ não têm efeitos
+  colaterais que interfiram entre si após a extração. Essa hipótese é
+  satisfeita quando não há escrita em memória nos ESeqs içados por
+  $e_1$ que leia posições de memória usadas por $e_2$ — o que é
+  garantido na IRT gerada pelo compilador TImp, pois cada ESEQ içado é
+  uma atribuição de temporário.
+\end{remark}
+
+\subsection{Implementação em Haskell}
+
+O módulo \texttt{IR.Backend.X86.CFG} implementa a canonicalização:
+
+\begin{minted}{haskell}
+-- Ponto de entrada: transforma a IRT de uma função em forma canônica.
+canonicalize :: Stmt -> Stmt
+canonicalize s = mkSeq (canonList s)
+  where
+    mkSeq []     = EXP (CONST 0)
+    mkSeq [x]    = x
+    mkSeq (x:xs) = SEQ x (mkSeq xs)
+\end{minted}
+
+A função auxiliar \texttt{canonList} implementa as regras Canon:
+
+\begin{minted}{haskell}
+canonList :: Stmt -> [Stmt]
+canonList (SEQ s1 s2)           = canonList s1 ++ canonList s2
+canonList (MOVE (TEMP t) src)   =
+  let (ss, src') = pullESeqs src in ss ++ [MOVE (TEMP t) src']
+canonList (MOVE (MEM addr) val) =
+  let (ss1, addr') = pullESeqs addr
+      (ss2, val')  = pullESeqs val
+  in ss1 ++ ss2 ++ [MOVE (MEM addr') val']
+canonList (EXP e)               =
+  let (ss, e') = pullESeqs e in ss ++ [EXP e']
+canonList (CJUMP e lt lf)       =
+  let (ss, e') = pullESeqs e in ss ++ [CJUMP e' lt lf]
+canonList (JUMP e)              =
+  let (ss, e') = pullESeqs e in ss ++ [JUMP e']
+canonList (RETURN es)           =
+  let pairs = map pullESeqs es
+  in concatMap fst pairs ++ [RETURN (map snd pairs)]
+canonList s = [s]
+\end{minted}
+
+A função \texttt{pullESeqs} implementa as regras Pull:
+
+\begin{minted}{haskell}
+pullESeqs :: Expr -> ([Stmt], Expr)
+pullESeqs (ESEQ s e) =
+  let (ss, e') = pullESeqs e in (canonList s ++ ss, e')
+pullESeqs (BINOP op e1 e2) =
+  let (ss1, e1') = pullESeqs e1
+      (ss2, e2') = pullESeqs e2
+  in (ss1 ++ ss2, BINOP op e1' e2')
+pullESeqs (MEM e)  =
+  let (ss, e') = pullESeqs e in (ss, MEM e')
+pullESeqs (CALL ef args) =
+  let (ssf, ef') = pullESeqs ef
+      pairs      = map pullESeqs args
+  in (ssf ++ concatMap fst pairs, CALL ef' (map snd pairs))
+pullESeqs e = ([], e)   -- CONST, TEMP, NAME: sem efeitos
+\end{minted}
+
+\subsection{Linearização}
+
+Após a canonicalização, a IRT é uma sequência de enunciados sem
+\texttt{ESEQ} e sem \texttt{SEQ} aninhados arbitrariamente, mas ainda
+pode conter \texttt{SEQ} no nível superior. A linearização achata essa
+estrutura em uma lista plana:
+
+\begin{minted}{haskell}
+linearize :: Stmt -> [Stmt]
+linearize (SEQ s1 s2) = linearize s1 ++ linearize s2
+linearize s           = [s]
+\end{minted}
+
+A lista resultante é o fluxo linear de instruções sobre o qual o
+construtor de CFG opera.
+
+\subsection{Exemplo}
+
+Considere a expressão IRT (gerada para \texttt{t := a[i]}):
+
+\begin{center}
+  \texttt{MOVE(TEMP t, ESEQ(MOVE(TEMP idx, TEMP i), MEM(TEMP arr + idx * 8)))}
+\end{center}
+
+Aplicando $\mathit{pull}$ ao lado direito:
+
+\begin{align*}
+  &\mathit{pull}(\texttt{ESEQ}(\texttt{MOVE}(\texttt{TEMP idx},\texttt{TEMP i}),
+  \texttt{MEM}(\ldots))) \\
+  &= (\mathit{canon}(\texttt{MOVE}(\texttt{TEMP idx},\texttt{TEMP i}))
+  \mathbin{+\!\!+} [], \; \texttt{MEM}(\ldots)) \\
+  &= ([\texttt{MOVE}(\texttt{TEMP idx}, \texttt{TEMP i})], \;
+  \texttt{MEM}(\ldots))
+\end{align*}
+
+Pela regra Canon-Move, o enunciado original se transforma em:
+
+\begin{center}
+  \texttt{MOVE(TEMP idx, TEMP i)} \quad seguido de \quad
+  \texttt{MOVE(TEMP t, MEM(TEMP arr + idx * 8))}
+\end{center}
+
+O \texttt{ESEQ} foi eliminado e o enunciado \texttt{MOVE(TEMP idx, TEMP i)}
+passou para o topo da sequência, onde o construtor de CFG o enxerga.
+
+\section{Runtime e Seções de Assembly}
+
+\subsection{Runtime de Suporte}
+
+O programa assembly gerado inclui três funções auxiliares implementadas em
+termos da libc, que formam o \emph{runtime} da linguagem:
+
+\begin{itemize}
+  \item \texttt{print(n)}: imprime o inteiro $n$ seguido de nova linha,
+    usando \texttt{printf} com formato \texttt{"\%d$\backslash$n"}.
+  \item \texttt{read\_int()}: lê um inteiro da entrada padrão usando
+    \texttt{scanf} e retorna seu valor em \texttt{\%rax}.
+  \item \texttt{alloc(n)}: aloca um bloco de $n \times 8$ bytes no heap
+    usando \texttt{malloc} e retorna o ponteiro em \texttt{\%rax}.
+\end{itemize}
+
+\subsection{Organização das Seções}
+
+O arquivo assembly gerado é estruturado nas seguintes seções do ELF:
+
+\begin{itemize}
+  \item \texttt{.note.GNU-stack}: diretiva que informa ao linker que a
+    pilha não precisa ser executável (exigência de segurança em kernels
+    modernos; sua ausência gera um aviso de linker).
+  \item \texttt{.rodata}: dados somente leitura. Contém as strings de
+    formato \texttt{"\%d$\backslash$n"} e \texttt{"\%d"} usadas pelo runtime.
+  \item \texttt{.bss}: dados sem valor inicial, de leitura e escrita.
+    Contém o buffer \texttt{.scan\_buf} onde \texttt{scanf} escreve o
+    inteiro lido. Esta seção \emph{deve} ser gravável, colocar o buffer
+    em \texttt{.rodata} causaria uma falha de segmentação.
+  \item \texttt{.text}: código executável. Contém o runtime e as funções
+    do programa.
+\end{itemize}
+
+\section{Compilação para Executável}
+
+O arquivo assembly gerado (\texttt{.s}) pode ser montado e vinculado com
+o GCC em um único passo:
+
+\begin{verbatim}
+gcc -o programa programa.s -no-pie
+\end{verbatim}
+
+A flag \texttt{-no-pie} desabilita o executável independente de posição
+(\textit{Position-Independent Executable}), simplificando o modelo de
+endereçamento. O GCC se encarrega de:
+
+\begin{enumerate}
+  \item Invocar o assembler GAS para traduzir \texttt{.s} em código
+    objeto \texttt{.o}.
+  \item Vincular o código objeto com a libc (necessária para \texttt{printf},
+    \texttt{scanf} e \texttt{malloc}).
+  \item Adicionar o ponto de entrada \texttt{\_start} que chama a função
+    \texttt{main} do programa.
+\end{enumerate}
+
+\section{Conclusão}
+
+A canonicalização é o primeiro passo indispensável antes de qualquer
+análise baseada em CFG. Sem ela, temporários definidos dentro de
+\texttt{ESEQ} ficam invisíveis à análise de vivacidade, levando a
+alocação de registradores a atribuir o mesmo registrador a temporários
+que, na verdade, estão vivos ao mesmo tempo: um bug silencioso que
+produz resultados errados.
+
+A implementação em Haskell demonstra como as regras formais $\mathit{pull}(e)$
+e $\mathit{canon}(s)$ se traduzem quase literalmente em código: cada regra de
+inferência corresponde a um caso da definição por padrão. A bifurcação
+\texttt{ESEQ} $\to$ $\mathit{pull}$ e demais construtores $\to$ identidade
+captura precisamente o comportamento esperado.
+
+No próximo capítulo tratamos da análise de vivacidade e da alocação de
+registradores por coloração de grafos: as duas fases que determinam,
+para cada temporário da IRT, se ele vai residir em um registrador físico
+ou em um slot da pilha.

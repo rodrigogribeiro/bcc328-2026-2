@@ -1,0 +1,1462 @@
+\chapter{Geração de Código Intermediário}
+
+\section{Introdução}
+
+A cadeia de transformações de um compilador raramente salta diretamente da
+árvore sintática abstrata (AST) para o código de máquina.  Tal salto seria
+possível, mas produziria código de baixa qualidade e tornaria o compilador
+fortemente acoplado à arquitetura-alvo.  A estratégia mais usada é
+introduzir uma
+\textbf{representação intermediária} (RI), uma linguagem interna de grau de
+abstração situado entre a linguagem-fonte de alto nível e o código de máquina.
+
+A figura a seguir resume o posicionamento da RI no \emph{pipeline}:
+
+\begin{center}
+  \begin{tikzpicture}[
+      node distance=1.2cm and 1.4cm,
+      box/.style={draw, rounded corners, minimum width=2.6cm, minimum
+        height=0.9cm,
+      font=\small\sffamily, align=center},
+      arr/.style={-Stealth, thick}
+    ]
+    \node[box] (ast)  {AST anotada};
+    \node[box, right=of ast]  (ir)   {RI};
+    \node[box, right=of ir]   (opt)  {RI otimizada};
+    \node[box, right=of opt]  (asm)  {Código alvo};
+    \draw[arr] (ast) -- (ir)  node[midway, above,
+    font=\tiny\sffamily]{tradução};
+    \draw[arr] (ir)  -- (opt) node[midway, above,
+    font=\tiny\sffamily]{otimizações};
+    \draw[arr] (opt) -- (asm) node[midway, above, font=\tiny\sffamily]{seleção};
+  \end{tikzpicture}
+\end{center}
+
+Este capítulo define formalmente a RI utilizada na disciplina, apresenta sua
+semântica operacional \emph{big-step} e descreve as regras de
+\textbf{tradução dirigida por sintaxe} que convertem a AST das linguagens
+TWhile e TImp para essa RI.
+
+\section{Propriedades Desejáveis}\label{sec:ir-desiderata}
+
+Uma boa RI deve satisfazer as seguintes propriedades:
+
+\begin{description}
+  \item[Simplicidade.] Poucos construtores facilitam a análise e a
+    transformação do código.  Um IR com apenas $\approx 15$ formas sintáticas
+    é preferível a um que espelhe todas as construções da linguagem-fonte.
+  \item[Independência de máquina.] A RI não deve codificar detalhes do
+    hardware-alvo (convenção de chamada, número de registradores, tamanho de
+    ponteiro).  Isso permite que um \emph{front-end} gere RI para
+    múltiplas arquiteturas.
+  \item[Independência de linguagem.] A RI não deve pressupor construções
+    específicas da linguagem-fonte, de modo que diferentes \emph{front-ends}
+    possam compartilhar o mesmo \emph{back-end}.  LLVM IR e JVM bytecode são
+    exemplos reais desse princípio.
+  \item[Suporte a transformações.] A RI deve facilitar análises de fluxo e
+    otimizações como propagação de constantes, eliminação de subexpressões
+    comuns e movimentação de código invariante a laços.
+  \item[Proximidade do código-alvo.] A RI deve expor operações de memória e
+    controle de fluxo explícitos, de modo que a seleção de instruções seja
+    direta.
+\end{description}
+
+\section{Abordagens Principais}\label{sec:ir-abordagens}
+
+Existem quatro famílias de RI amplamente usadas:
+
+\begin{enumerate}
+  \item \textbf{RI em árvore de baixo nível.} A AST é rebaixada
+    (\emph{lowered}) para uma árvore com operações explícitas de memória e
+    saltos incondicionais/condicionais.  É a abordagem adotada neste capítulo
+    e no compilador \textbf{Tiger} de Appel.
+  \item \textbf{Código de máquina de pilha (\emph{bytecode}).} Instruções
+    operam em uma pilha de operandos virtual.  Exemplos: \emph{p-code}
+    (Pascal), JVM, CPython.
+  \item \textbf{Código de três endereços / quádruplas.} Cada instrução tem a
+    forma $t \leftarrow a \oplus b$, onde $t$, $a$ e $b$ são temporários ou
+    constantes.  Organizado em blocos básicos e grafo de fluxo de controle.
+    Exemplo: LLVM IR.
+  \item \textbf{Representação em estilo de passagem de continuações (CPS).}
+    Comum em compiladores de linguagens funcionais.  Todo salto torna-se uma
+    chamada de função; não há implicitamente um ``próximo passo''.
+\end{enumerate}
+
+Neste capítulo adotamos a abordagem (1): uma \textbf{representação
+intermediária em árvore} (doravante IRT).
+
+\section{A Representação Intermediária em Árvore (IRT)}\label{sec:irt}
+
+A IRT distingue dois tipos de nós: \textbf{expressões} (que produzem um valor
+de tamanho de palavra) e \textbf{comandos} (que produzem efeitos colaterais).
+
+\subsection{Sintaxe das Expressões}\label{sec:irt-expr}
+
+\begin{Definition}[Expressões da IRT]\label{def:irt-expr}
+  O conjunto das expressões da IRT é dado pela gramática:
+  \begin{align*}
+    e \;::=\; & \mathbf{CONST}(n)                       & n \in \mathbb{Z} \\
+    \mid\; & \mathbf{TEMP}(t)                    & t \in \mathit{Temp} \\
+    \mid\; & \mathbf{NAME}(\ell)                 & \ell \in \mathit{Label} \\
+    \mid\; & \mathbf{BINOP}(\mathit{op}, e_1, e_2) \\
+    \mid\; & \mathbf{MEM}(e)                     \\
+    \mid\; & \mathbf{CALL}(e_f, e_1, \ldots, e_n) \\
+    \mid\; & \mathbf{ESEQ}(s, e)
+  \end{align*}
+  onde $\mathit{op} \in \{
+    \mathtt{ADD}, \mathtt{SUB}, \mathtt{MUL}, \mathtt{DIV}, \mathtt{MOD},
+    \mathtt{AND}, \mathtt{OR},  \mathtt{XOR},
+    \mathtt{LSHIFT}, \mathtt{RSHIFT}, \mathtt{ARSHIFT},
+    \mathtt{EQ},  \mathtt{NEQ},
+    \mathtt{LT},  \mathtt{LEQ}, \mathtt{GT},  \mathtt{GEQ}
+  \}$.
+\end{Definition}
+
+A semântica informal de cada construtor é:
+
+\begin{center}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{>{\ttfamily}l p{9.5cm}}
+    \toprule
+    \normalfont Construtor & Significado \\
+    \midrule
+    CONST(n)            & Constante inteira $n$.  Booleanos são codificados como
+    $0$ (falso) e $1$ (verdadeiro). \\
+    TEMP(t)             & Valor armazenado no temporário $t$.  Temporários são
+    variáveis sem endereço; o alocador de registradores os
+    mapeará para registradores ou posições na pilha. \\
+    NAME($\ell$)        & Endereço de memória associado ao rótulo
+    $\ell$.  Permite
+    passar o endereço de uma função ou de um rótulo de salto
+    como dado. \\
+    BINOP(op, $e_1$, $e_2$) & Aplica a operação binária \textit{op}
+    aos valores de
+    $e_1$ e $e_2$.  Operações de comparação produzem $1$
+    (verdadeiro) ou $0$ (falso). \\
+    MEM($e$)            & Lê a palavra de memória no endereço $e$.  No lado
+    esquerdo de \textbf{MOVE}, denota escrita. \\
+    CALL($e_f$, $\overline{e}$) & Chama a função cujo endereço é $e_f$, com
+    argumentos $\overline{e}$.  O resultado fica em
+    registradores de retorno convencionais. \\
+    ESEQ($s$, $e$)      & Executa o comando $s$ pelos seus efeitos e
+    então avalia
+    $e$ como valor da expressão inteira.  Permite embutir
+    efeitos dentro de uma expressão. \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\subsection{Sintaxe dos Comandos}\label{sec:irt-stmt}
+
+\begin{Definition}[Comandos da IRT]\label{def:irt-stmt}
+  O conjunto dos comandos da IRT é dado por:
+  \begin{align*}
+    s \;::=\; & \mathbf{MOVE}(e_{\mathit{dst}}, e)
+    & e_{\mathit{dst}} \in \{\mathbf{TEMP}(t),\; \mathbf{MEM}(e')\} \\
+    \mid\; & \mathbf{EXP}(e) \\
+    \mid\; & \mathbf{SEQ}(s_1, s_2) \\
+    \mid\; & \mathbf{JUMP}(e) \\
+    \mid\; & \mathbf{CJUMP}(e, \ell_t, \ell_f) \\
+    \mid\; & \mathbf{LABEL}(\ell) \\
+    \mid\; & \mathbf{RETURN}(e_1, \ldots, e_n)
+  \end{align*}
+\end{Definition}
+
+\begin{center}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{>{\ttfamily}l p{9.5cm}}
+    \toprule
+    \normalfont Construtor & Significado \\
+    \midrule
+    MOVE(TEMP($t$), $e$) & Atribui o valor de $e$ ao temporário $t$. \\
+    MOVE(MEM($e_a$), $e$) & Escreve o valor de $e$ no endereço de
+    memória $e_a$. \\
+    EXP($e$)             & Avalia $e$ e descarta o resultado; usado para efeitos
+    colaterais (e.g., chamadas sem valor de retorno). \\
+    SEQ($s_1$, $s_2$)    & Executa $s_1$ e depois $s_2$ sequencialmente. \\
+    JUMP($e$)            & Salta incondicionalmente para o endereço $e$. \\
+    CJUMP($e$, $\ell_t$, $\ell_f$) & Se $e \neq 0$ salta para $\ell_t$;
+    caso contrário, para $\ell_f$. \\
+    LABEL($\ell$)        & Define o rótulo $\ell$ neste ponto do código.
+    Não produz instrução de máquina; apenas marca uma
+    posição endereçável. \\
+    RETURN($\overline{e}$) & Encerra a função corrente devolvendo os valores
+    $\overline{e}$ ao chamador. \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\begin{remark}
+  A restrição sobre o destino de \textbf{MOVE} (apenas \textbf{TEMP} ou
+  \textbf{MEM}) é intencional: ela evita destinos arbitrários e facilita a
+  geração de código, pois toda escrita em memória ou em registrador é
+  sintaticamente distinguível.
+\end{remark}
+
+\section{Semântica Operacional Big-Step da IRT}\label{sec:irt-semantics}
+
+\subsection{Estado e Valores}\label{sec:irt-state}
+
+\begin{Definition}[Estado]\label{def:irt-state}
+  Um \textbf{estado} é um par $\sigma = \langle \tau, \mu \rangle$ onde:
+  \begin{itemize}
+    \item $\tau : \mathit{Temp} \rightharpoonup \mathbb{Z}$ é o
+      \emph{armazenamento de temporários}, uma função parcial de temporários
+      em inteiros;
+    \item $\mu : \mathbb{Z} \rightharpoonup \mathbb{Z}$ é a
+      \emph{memória}, que mapeia endereços inteiros em palavras.
+  \end{itemize}
+  Escrevemos $\sigma.\tau$ e $\sigma.\mu$ para acessar os componentes.
+  As notações $\tau[t \mapsto v]$ e $\mu[a \mapsto v]$ denotam,
+  respectivamente, a atualização do temporário $t$ e da posição de memória $a$
+  com o valor $v$.
+\end{Definition}
+
+Todos os valores da IRT são inteiros de precisão de máquina ($\mathbb{Z}$).
+Ponteiros, booleanos e outros tipos são codificados como inteiros.
+
+Um \textbf{programa IRT} é uma função parcial
+$P : \mathit{Label} \rightharpoonup \mathit{Stmt}$
+que mapeia cada rótulo a um comando (ou sequência de comandos).
+
+\subsection{Semântica das Expressões}\label{sec:irt-expr-sem}
+
+A relação $\sigma \vdash e \Downarrow v$ significa ``no estado $\sigma$, a
+expressão $e$ avalia para o inteiro $v$''.
+
+\subsubsection*{Constantes e Temporários}
+
+\[
+  \infer[\textsc{Const}]
+  {\sigma \vdash \mathbf{CONST}(n) \Downarrow n}
+  {}
+  \qquad
+  \infer[\textsc{Temp}]
+  {\sigma \vdash \mathbf{TEMP}(t) \Downarrow v}
+  {\sigma.\tau(t) = v}
+\]
+
+\[
+  \infer[\textsc{Name}]
+  {\sigma \vdash \mathbf{NAME}(\ell) \Downarrow \mathit{addr}(\ell)}
+  {}
+\]
+
+A função $\mathit{addr}(\ell)$ devolve o endereço de código associado ao
+rótulo $\ell$; assume-se que este mapeamento é fixado em tempo de link.
+
+\subsubsection*{Operações Binárias}
+
+\[
+  \infer[\textsc{BinOp}]
+  {\sigma \vdash \mathbf{BINOP}(\mathit{op}, e_1, e_2) \Downarrow
+  \mathit{op}(v_1, v_2)}
+  {\sigma \vdash e_1 \Downarrow v_1 \quad
+  \sigma \vdash e_2 \Downarrow v_2}
+\]
+
+A interpretação de $\mathit{op}(v_1, v_2)$ é a habitual.
+Para operadores de comparação ($\mathtt{EQ}$, $\mathtt{LT}$, etc.),
+o resultado é $1$ se a relação se mantém e $0$ caso contrário:
+\[
+  \mathtt{EQ}(v_1, v_2) =
+  \begin{cases} 1 & \text{se } v_1 = v_2 \\ 0 & \text{caso contrário.}
+  \end{cases}
+\]
+
+\subsubsection*{Acesso à Memória}
+
+\[
+  \infer[\textsc{Mem}]
+  {\sigma \vdash \mathbf{MEM}(e) \Downarrow v}
+  {\sigma \vdash e \Downarrow a \quad \sigma.\mu(a) = v}
+\]
+
+\subsubsection*{Chamada de Função}
+
+\[
+  \infer[\textsc{Call}]
+  {\sigma \vdash \mathbf{CALL}(e_f, e_1, \ldots, e_n) \Downarrow v}
+  {\sigma \vdash e_f   \Downarrow a \quad
+    \sigma \vdash e_i   \Downarrow v_i \quad
+  \mathit{invoke}(a, v_1,\ldots,v_n) = v}
+\]
+
+A função auxiliar $\mathit{invoke}$ modela a invocação da função residente no
+endereço $a$ com os argumentos fornecidos.  Seu resultado é o valor de
+retorno.  A implementação concreta de $\mathit{invoke}$ depende da convenção
+de chamada e está fora do escopo desta apresentação formal.
+
+\subsubsection*{Expressão Sequenciada}
+
+\[
+  \infer[\textsc{ESeq}]
+  {\sigma \vdash \mathbf{ESEQ}(s, e) \Downarrow v}
+  {P, \sigma \vdash s \Downarrow \langle \sigma', \blacksquare \rangle \quad
+  \sigma' \vdash e \Downarrow v}
+\]
+
+O $\mathbf{ESEQ}$ executa o comando $s$ (modificando o estado) e depois
+avalia $e$ no estado resultante.  A notação $P, \sigma \vdash s \Downarrow
+\langle \sigma', \blacksquare \rangle$ é definida na seção seguinte.
+
+\subsection{Semântica dos Comandos}\label{sec:irt-stmt-sem}
+
+A relação $P, \sigma \vdash s \Downarrow r$ significa
+``dado o programa $P$ e o estado inicial $\sigma$, o comando $s$ executa e
+produz o resultado $r$''.
+
+\begin{Definition}[Resultado de Execução]\label{def:irt-result}
+  O resultado $r$ de um comando é:
+  \[
+    r \;::=\; \langle \sigma', \blacksquare \rangle
+    \;\mid\; \langle \sigma', \uparrow (v_1,\ldots,v_k) \rangle
+  \]
+  O símbolo $\blacksquare$ denota terminação normal e
+  $\uparrow(v_1,\ldots,v_k)$ denota retorno de função com valores
+  $v_1,\ldots,v_k$.
+\end{Definition}
+
+\subsubsection*{Atribuição a Temporário}
+
+\[
+  \infer[\textsc{MoveTemp}]
+  {P, \sigma \vdash \mathbf{MOVE}(\mathbf{TEMP}(t), e)
+  \Downarrow \langle \sigma', \blacksquare \rangle}
+  {\sigma \vdash e \Downarrow v \quad
+  \sigma' = \langle \sigma.\tau[t \mapsto v],\; \sigma.\mu \rangle}
+\]
+
+\subsubsection*{Escrita em Memória}
+
+\[
+  \infer[\textsc{MoveMem}]
+  {P, \sigma \vdash \mathbf{MOVE}(\mathbf{MEM}(e_a), e)
+  \Downarrow \langle \sigma', \blacksquare \rangle}
+  {\sigma \vdash e_a \Downarrow a \quad
+    \sigma \vdash e   \Downarrow v \quad
+  \sigma' = \langle \sigma.\tau,\; \sigma.\mu[a \mapsto v] \rangle}
+\]
+
+\subsubsection*{Expressão como Comando}
+
+\[
+  \infer[\textsc{Exp}]
+  {P, \sigma \vdash \mathbf{EXP}(e) \Downarrow \langle \sigma,
+  \blacksquare \rangle}
+  {\sigma \vdash e \Downarrow \_}
+\]
+
+O valor produzido por $e$ é descartado; apenas os efeitos colaterais (como
+uma chamada de função com efeitos) são relevantes.
+
+\subsubsection*{Sequência}
+
+\[
+  \infer[\textsc{SeqNorm}]
+  {P, \sigma \vdash \mathbf{SEQ}(s_1, s_2)
+  \Downarrow \langle \sigma'', r \rangle}
+  {P, \sigma  \vdash s_1 \Downarrow \langle \sigma', \blacksquare \rangle \quad
+  P, \sigma' \vdash s_2 \Downarrow \langle \sigma'', r \rangle}
+\]
+
+\[
+  \infer[\textsc{SeqRet}]
+  {P, \sigma \vdash \mathbf{SEQ}(s_1, s_2)
+  \Downarrow \langle \sigma', \uparrow \overline{v} \rangle}
+  {P, \sigma \vdash s_1 \Downarrow \langle \sigma', \uparrow
+  \overline{v} \rangle}
+\]
+
+Se $s_1$ retorna, $s_2$ não é executado: o resultado de retorno propaga-se
+diretamente.
+
+\subsubsection*{Rótulo}
+
+\[
+  \infer[\textsc{Label}]
+  {P, \sigma \vdash \mathbf{LABEL}(\ell) \Downarrow \langle \sigma,
+  \blacksquare \rangle}
+  {}
+\]
+
+$\mathbf{LABEL}$ não produz efeito em tempo de execução; é uma anotação
+estática para o vinculador e para os saltos.
+
+\subsubsection*{Salto Incondicional}
+
+\[
+  \infer[\textsc{Jump}]
+  {P, \sigma \vdash \mathbf{JUMP}(\mathbf{NAME}(\ell))
+  \Downarrow r}
+  {P(\ell) = s \quad P, \sigma \vdash s \Downarrow r}
+\]
+
+O salto consulta $P$ para obter a continuação do rótulo $\ell$ e a executa.
+
+\subsubsection*{Salto Condicional}
+
+\[
+  \infer[\textsc{CJumpTrue}]
+  {P, \sigma \vdash \mathbf{CJUMP}(e, \ell_t, \ell_f) \Downarrow r}
+  {\sigma \vdash e \Downarrow v \quad v \neq 0 \quad
+  P(\ell_t) = s \quad P, \sigma \vdash s \Downarrow r}
+\]
+
+\[
+  \infer[\textsc{CJumpFalse}]
+  {P, \sigma \vdash \mathbf{CJUMP}(e, \ell_t, \ell_f) \Downarrow r}
+  {\sigma \vdash e \Downarrow 0 \quad
+  P(\ell_f) = s \quad P, \sigma \vdash s \Downarrow r}
+\]
+
+\subsubsection*{Retorno}
+
+\[
+  \infer[\textsc{Return}]
+  {P, \sigma \vdash \mathbf{RETURN}(e_1, \ldots, e_k)
+  \Downarrow \langle \sigma, \uparrow (v_1, \ldots, v_k) \rangle}
+  {\sigma \vdash e_i \Downarrow v_i \quad (1 \leq i \leq k)}
+\]
+
+\begin{remark}
+  A semântica big-step apresentada não termina para programas que executam
+  laços infinitos, o que é esperado: a semântica big-step é definida apenas
+  para computações que terminam.  Para raciocinar sobre não-terminação,
+  utiliza-se semântica small-step ou a semântica de rastreamentos
+  (\emph{trace semantics}).
+\end{remark}
+
+\section{Tradução Dirigida por Sintaxe}\label{sec:irt-sdt}
+
+A tradução de TWhile e TImp para a IRT é definida por duas funções de
+tradução indutivas sobre a AST:
+
+\begin{itemize}
+  \item $\mathcal{E}\llbracket e \rrbracket$ : traduz uma expressão
+    de entrada em
+    uma expressão IRT;
+  \item $\mathcal{S}\llbracket s \rrbracket$ : traduz um comando de
+    entrada em um
+    comando IRT.
+\end{itemize}
+
+Assumimos que a AST foi previamente verificada pelo analisador semântico, de
+modo que todos os tipos são conhecidos e corretos.
+
+\subsection{Tradução de Expressões}\label{sec:sdt-expr}
+
+\subsubsection*{Literais}
+
+\begin{align*}
+  \mathcal{E}\llbracket \mathtt{false} \rrbracket &= \mathbf{CONST}(0) \\
+  \mathcal{E}\llbracket \mathtt{true}  \rrbracket &= \mathbf{CONST}(1) \\
+  \mathcal{E}\llbracket n \rrbracket              &= \mathbf{CONST}(n)
+  \qquad n \in \mathbb{Z}
+\end{align*}
+
+Strings são tratadas como ponteiros para dados estáticos e são aqui omitidas
+por brevidade.
+
+\subsubsection*{Variáveis}
+
+\[
+  \mathcal{E}\llbracket x \rrbracket = \mathbf{TEMP}(x)
+\]
+
+Cada variável local é mapeada para um temporário de mesmo nome.  O alocador
+de registradores decide posteriormente se o temporário vive em um registrador
+ou em uma posição na pilha.
+
+\subsubsection*{Operações Aritméticas e Relacionais}
+
+\[
+  \mathcal{E}\llbracket e_1 \oplus e_2 \rrbracket =
+  \mathbf{BINOP}(\widehat{\oplus},\;
+    \mathcal{E}\llbracket e_1 \rrbracket,\;
+  \mathcal{E}\llbracket e_2 \rrbracket)
+\]
+
+onde $\widehat{\oplus}$ é o operador IRT correspondente:
+
+\begin{center}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{cc|cc|cc}
+    \toprule
+    TWhile & IRT & TWhile & IRT & TWhile & IRT \\
+    \midrule
+    \texttt{+}  & ADD & \texttt{==} & EQ  & \texttt{<}  & LT  \\
+    \texttt{-}  & SUB & \texttt{!=} & NEQ & \texttt{<=} & LEQ \\
+    \texttt{*}  & MUL & \texttt{>}  & GT  & \texttt{>=} & GEQ \\
+    \texttt{/}  & DIV & \texttt{\&\&} & AND & \texttt{||} & OR \\
+    \texttt{\%} & MOD & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\subsubsection*{Negação Unária e \texttt{not}}
+
+\begin{align*}
+  \mathcal{E}\llbracket -\, e \rrbracket
+  &= \mathbf{BINOP}(\mathtt{SUB},\; \mathbf{CONST}(0),\;
+  \mathcal{E}\llbracket e \rrbracket) \\
+  \mathcal{E}\llbracket \mathtt{not}\; e \rrbracket
+  &= \mathbf{BINOP}(\mathtt{EQ},\;
+  \mathcal{E}\llbracket e \rrbracket,\; \mathbf{CONST}(0))
+\end{align*}
+
+\subsubsection*{Chamada de Função}
+
+\[
+  \mathcal{E}\llbracket f(e_1, \ldots, e_n) \rrbracket =
+  \mathbf{CALL}\!\left(\mathbf{NAME}(f),\;
+    \mathcal{E}\llbracket e_1 \rrbracket,\; \ldots,\;
+  \mathcal{E}\llbracket e_n \rrbracket\right)
+\]
+
+\subsection{Tradução de Comandos}\label{sec:sdt-stmt}
+
+\subsubsection*{Declaração de Variável Local}
+
+\[
+  \mathcal{S}\llbracket \mathtt{let}\; x : T := e \mathtt{;} \rrbracket =
+  \mathbf{MOVE}(\mathbf{TEMP}(x),\; \mathcal{E}\llbracket e \rrbracket)
+\]
+
+\subsubsection*{Atribuição Simples}
+
+\[
+  \mathcal{S}\llbracket x := e \mathtt{;} \rrbracket =
+  \mathbf{MOVE}(\mathbf{TEMP}(x),\; \mathcal{E}\llbracket e \rrbracket)
+\]
+
+\subsubsection*{Retorno}
+
+\[
+  \mathcal{S}\llbracket \mathtt{return}\; e \mathtt{;} \rrbracket =
+  \mathbf{RETURN}(\mathcal{E}\llbracket e \rrbracket)
+\]
+
+\[
+  \mathcal{S}\llbracket \mathtt{return} \mathtt{;} \rrbracket =
+  \mathbf{RETURN}()
+\]
+
+\subsubsection*{Sequência de Comandos}
+
+\[
+  \begin{aligned}
+    \mathcal{S}\llbracket s_1\; s_2\; \cdots\; s_n \rrbracket
+    &= \mathbf{SEQ}(\mathcal{S}\llbracket s_1 \rrbracket, \\
+      &\quad \mathbf{SEQ}(\mathcal{S}\llbracket s_2 \rrbracket, \\
+    &\qquad \cdots\; \mathcal{S}\llbracket s_n \rrbracket \cdots))
+  \end{aligned}
+\]
+
+\subsection{Tradução de Estruturas de Controle}\label{sec:sdt-control}
+
+\subsubsection*{Condicional}
+
+Para traduzir $\mathtt{if}\; e\; \{\, b_{\mathit{then}} \,\}$,
+geramos dois novos rótulos $\ell_t$ e $\ell_f$:
+
+\[
+  \begin{aligned}
+    \mathcal{S}\llbracket \mathtt{if}\; e\; \{b_t\} \rrbracket
+    &= \mathbf{SEQ}( \\
+      &\quad \mathbf{CJUMP}(\mathcal{E}\llbracket e \rrbracket,\;
+      \ell_t,\; \ell_f), \\
+      &\quad \mathbf{SEQ}( \\
+        &\qquad \mathbf{LABEL}(\ell_t), \\
+        &\qquad \mathbf{SEQ}( \\
+          &\qquad\quad \mathcal{S}\llbracket b_t \rrbracket, \\
+    &\qquad\quad \mathbf{LABEL}(\ell_f))))
+  \end{aligned}
+\]
+
+Para $\mathtt{if}\; e\; \{b_t\}\; \mathtt{else}\; \{b_f\}$, introduzimos um
+rótulo adicional $\ell_{\mathit{end}}$:
+
+\[
+  \begin{aligned}
+    \mathcal{S}\llbracket \mathtt{if}\; e\; \{b_t\}\; \mathtt{else}\;
+    \{b_f\} \rrbracket
+    &= \mathbf{SEQ}( \\
+      &\quad \mathbf{CJUMP}(\mathcal{E}\llbracket e \rrbracket,\;
+      \ell_t,\; \ell_f), \\
+      &\quad \mathbf{SEQ}( \\
+        &\qquad \mathbf{LABEL}(\ell_t), \\
+        &\qquad \mathbf{SEQ}( \\
+          &\qquad\quad \mathcal{S}\llbracket b_t \rrbracket, \\
+          &\qquad\quad \mathbf{SEQ}( \\
+            &\qquad\qquad \mathbf{JUMP}(\mathbf{NAME}(\ell_{\mathit{end}})), \\
+            &\qquad\qquad \mathbf{SEQ}( \\
+              &\qquad\qquad\quad \mathbf{LABEL}(\ell_f), \\
+              &\qquad\qquad\quad \mathbf{SEQ}( \\
+                &\qquad\qquad\qquad \mathcal{S}\llbracket b_f \rrbracket, \\
+    &\qquad\qquad\qquad \mathbf{LABEL}(\ell_{\mathit{end}})))))))
+  \end{aligned}
+\]
+
+O $\mathbf{JUMP}$ ao final do ramo \emph{then} evita que a execução
+``caia'' no corpo do ramo \emph{else}.
+
+\subsubsection*{Laço \texttt{while}}
+
+Para $\mathtt{while}\; e\; \{b\}$, introduzimos três novos rótulos:
+$\ell_h$ (cabeça do laço), $\ell_b$ (corpo) e $\ell_f$ (após o laço):
+
+\[
+  \begin{aligned}
+    \mathcal{S}\llbracket \mathtt{while}\; e\; \{b\} \rrbracket
+    &= \mathbf{SEQ}( \\
+      &\quad \mathbf{LABEL}(\ell_h), \\
+      &\quad \mathbf{SEQ}( \\
+        &\qquad \mathbf{CJUMP}(\mathcal{E}\llbracket e \rrbracket,\;
+        \ell_b,\; \ell_f), \\
+        &\qquad \mathbf{SEQ}( \\
+          &\qquad\quad \mathbf{LABEL}(\ell_b), \\
+          &\qquad\quad \mathbf{SEQ}( \\
+            &\qquad\qquad \mathcal{S}\llbracket b \rrbracket, \\
+            &\qquad\qquad \mathbf{SEQ}( \\
+              &\qquad\qquad\quad \mathbf{JUMP}(\mathbf{NAME}(\ell_h)), \\
+    &\qquad\qquad\quad \mathbf{LABEL}(\ell_f))))))
+  \end{aligned}
+\]
+
+O $\mathbf{JUMP}(\mathbf{NAME}(\ell_h))$ ao final do corpo fecha o laço,
+retornando ao teste da condição.
+
+\subsection{Tradução de Funções}\label{sec:sdt-fn}
+
+Uma declaração de função de nível superior
+
+\[
+  \mathtt{fn}\; f\;
+  (p_1 : T_1,\; \ldots,\; p_n : T_n) : T_r\; \{b\}
+\]
+
+é traduzida em um \textbf{fragmento de função} $(f,\; s_{\mathit{body}})$
+onde:
+
+\[
+  \begin{aligned}
+    s_{\mathit{body}}
+    &= \mathbf{SEQ}( \\
+      &\quad \mathbf{MOVE}(\mathbf{TEMP}(p_1),\; \mathbf{TEMP}(a_1)), \\
+      &\quad \cdots \\
+      &\quad \mathbf{SEQ}( \\
+        &\qquad \mathbf{MOVE}(\mathbf{TEMP}(p_n),\; \mathbf{TEMP}(a_n)), \\
+    &\qquad \mathcal{S}\llbracket b \rrbracket))
+  \end{aligned}
+\]
+
+Os temporários $a_1, \ldots, a_n$ representam os registradores (ou
+posições de pilha) onde a convenção de chamada deposita os argumentos.
+O prólogo da função copia cada argumento para o temporário do parâmetro
+formal correspondente.
+
+\section{Exemplo Completo}\label{sec:irt-example}
+
+Consideremos a função fatorial:
+
+\begin{minted}{text}
+fn fat(n : int) : int {
+    if n <= 1 {
+        return 1;
+    } else {
+        return n * fat(n - 1);
+    }
+}
+\end{minted}
+
+Aplicando as regras de tradução, obtemos o fragmento IRT (omitindo os
+rótulos numéricos por brevidade):
+
+\begin{minted}{text}
+fat:
+  MOVE(TEMP(n), TEMP(a0))           -- copia arg da conv. de chamada
+  CJUMP(BINOP(LEQ, TEMP(n), CONST(1)), L_then, L_else)
+  LABEL(L_then)
+    RETURN(CONST(1))
+  LABEL(L_else)
+    RETURN(BINOP(MUL,
+             TEMP(n),
+             CALL(NAME(fat),
+                  BINOP(SUB, TEMP(n), CONST(1)))))
+\end{minted}
+
+Observe que cada ramo do \texttt{if-else} termina com \textbf{RETURN}, de
+modo que não é necessário um rótulo de confluência ao final.
+
+\section{Formas Canônicas}\label{sec:irt-canonical}
+
+A IRT recém-gerada contém dois tipos de ``ruído'' que complicam as fases
+posteriores:
+
+\begin{enumerate}
+  \item \textbf{$\mathbf{ESEQ}$ em posições arbitrárias.}
+    $\mathbf{ESEQ}$ pode reordenar efeitos colaterais de maneira
+    não-óbvia quando aparece dentro de operandos de $\mathbf{BINOP}$ ou
+    $\mathbf{CALL}$.
+  \item \textbf{$\mathbf{CALL}$ dentro de expressões.}
+    O valor de retorno de uma chamada precisa ser capturado em um temporário
+    antes de ser usado como operando.
+\end{enumerate}
+
+O processo de \textbf{canonicalização} elimina esses problemas em duas
+passagens:
+
+\begin{description}
+  \item[Linearização.] $\mathbf{ESEQ}$ é ``içado'' (\emph{hoisted}) para
+    o nível de comando via reescrita:
+    \[
+      \begin{aligned}
+        &\mathbf{BINOP}(\mathit{op},\; \mathbf{ESEQ}(s, e_1),\; e_2)
+        \;\longrightarrow\;
+        \mathbf{ESEQ}( \\
+          &\quad s, \\
+        &\quad \mathbf{BINOP}(\mathit{op},\; e_1,\; e_2))
+      \end{aligned}
+    \]
+    desde que $s$ não contenha efeitos que interfiram com $e_2$.
+
+  \item[Extração de chamadas.] Toda $\mathbf{CALL}$ dentro de uma expressão
+    é substituída por
+    \[
+      \begin{aligned}
+        &\mathbf{ESEQ}( \\
+          &\quad \mathbf{MOVE}(\mathbf{TEMP}(t),\; \mathbf{CALL}(\cdots)), \\
+        &\quad \mathbf{TEMP}(t))
+      \end{aligned}
+    \]
+    para um novo temporário $t$.
+\end{description}
+
+Após a canonicalização, a IRT está em \textbf{forma linear}: uma sequência
+plana de comandos sem $\mathbf{ESEQ}$, que pode ser facilmente particionada
+em \textbf{blocos básicos} para análise de fluxo de controle.
+
+\section{Implementação em Haskell: Geração de Código para
+TWhile}\label{sec:ir-impl-haskell}
+
+Esta seção descreve a implementação concreta do \emph{backend} de geração de
+código intermediário para a linguagem TWhile, desenvolvida em Haskell no módulo
+\texttt{TWhile.Backend.IR.TWhileCodegen}.  A implementação segue de perto as
+regras de tradução apresentadas na Seção~\ref{sec:irt-sdt} e serve como
+referência direta entre a teoria e o código executável.
+
+\subsection{Mônada de Geração de Código}\label{sec:ir-impl-monad}
+
+A geração de código requer dois efeitos distintos:
+
+\begin{enumerate}
+  \item \textbf{Geração de rótulos:} os construtores \texttt{SWhile}
+    e \texttt{SIf} necessitam de rótulos únicos para os pontos de entrada
+    e saída de cada bloco de controle.  Um contador global garante a unicidade.
+  \item \textbf{Sinalização de erros:} situações inesperadas durante a
+    compilação são propagadas como mensagens de erro sem abortar o programa.
+\end{enumerate}
+
+Esses dois efeitos são combinados via transformadores de mônada:
+
+\begin{minted}{haskell}
+data CgState = CgState
+  { nextLabel :: Int
+  , stmtAcc   :: [IR.Stmt]
+  }
+
+type CgM a = StateT CgState (ExceptT String Identity) a
+\end{minted}
+
+O estado \texttt{CgState} mantém:
+\begin{itemize}
+  \item \texttt{nextLabel}: o próximo inteiro livre para formar um rótulo único;
+  \item \texttt{stmtAcc}: a lista de instruções IRT emitidas até o momento
+    (o acumulador de saída).
+\end{itemize}
+
+A camada \texttt{ExceptT String Identity} provê propagação de erros sem I/O;
+\texttt{Identity} é usada porque a geração de código é uma transformação pura.
+Dois auxiliares encapsulam as operações mais comuns:
+
+\begin{minted}{haskell}
+freshLabel :: String -> CgM IR.Label
+freshLabel prefix = do
+  n <- gets nextLabel
+  modify (\s -> s { nextLabel = n + 1 })
+  return (prefix ++ "_" ++ show n)
+
+emit :: IR.Stmt -> CgM ()
+emit s = modify (\st -> st { stmtAcc = stmtAcc st ++ [s] })
+\end{minted}
+
+\texttt{freshLabel} consome o contador e devolve um rótulo como
+\texttt{"while\_head\_0"}, \texttt{"if\_true\_1"}, etc.
+\texttt{emit} acrescenta uma instrução ao acumulador.
+
+\subsection{Ponto de Entrada}\label{sec:ir-impl-entry}
+
+A função principal recebe a AST de um programa TWhile e produz um
+\texttt{IR.Program}, isto é, uma lista de \texttt{FuncDef}:
+
+\begin{minted}{haskell}
+compileTWhile :: TWhile -> Either String IR.Program
+compileTWhile (TWhile stmts) =
+  case runCgM (mapM_ codegenStmt stmts) of
+    Left err -> Left err
+    Right ss -> Right [IR.FuncDef "main" [] (foldStmts ss)]
+\end{minted}
+
+O programa TWhile inteiro é embutido em uma única função \texttt{main} sem
+parâmetros.  A função auxiliar \texttt{foldStmts} converte a lista plana de
+instruções em uma árvore \texttt{SEQ} associada à direita:
+
+\begin{minted}{haskell}
+foldStmts :: [IR.Stmt] -> IR.Stmt
+foldStmts []     = IR.EXP (IR.CONST 0)
+foldStmts [s]    = s
+foldStmts (s:ss) = IR.SEQ s (foldStmts ss)
+\end{minted}
+
+\subsection{Geração de Comandos}\label{sec:ir-impl-stmts}
+
+A função \texttt{codegenStmt} implementa as regras de tradução de comandos.
+Cada caso consome um construtor da AST de TWhile e emite zero ou mais
+instruções IRT.
+
+\subsubsection*{Declaração e Atribuição}
+
+\begin{minted}{haskell}
+codegenStmt (SDecl v _ e) = do
+  ir <- codegenExp e
+  emit (IR.MOVE (IR.TEMP v) ir)
+
+codegenStmt (SAssign v e) = do
+  ir <- codegenExp e
+  emit (IR.MOVE (IR.TEMP v) ir)
+\end{minted}
+
+Ambos os casos traduzem diretamente para
+$\mathbf{MOVE}(\mathbf{TEMP}(v),\; \mathcal{E}\llbracket e \rrbracket)$,
+conforme as regras da Seção~\ref{sec:sdt-stmt}.  A anotação de tipo na
+declaração é descartada, pois a IRT é não-tipada.
+
+\subsubsection*{Impressão e Leitura}
+
+\begin{minted}{haskell}
+codegenStmt (SPrint e) = do
+  ir <- codegenExp e
+  emit (IR.EXP (IR.CALL (IR.NAME "print") [ir]))
+
+codegenStmt (SRead _ v) =
+  emit (IR.MOVE (IR.TEMP v) (IR.CALL (IR.NAME "read_int") []))
+\end{minted}
+
+A impressão compila para uma chamada à função embutida \texttt{print}, cujo
+efeito colateral é exibir o valor no terminal.
+A leitura descarta a expressão de \emph{prompt} (que seria uma string, não
+representável na IRT inteira) e obtém o valor via a função embutida
+\texttt{read\_int}.
+
+\subsubsection*{Laço \texttt{while}}
+
+\begin{minted}{haskell}
+codegenStmt (SWhile e body) = do
+  lh <- freshLabel "while_head"
+  lb <- freshLabel "while_body"
+  lf <- freshLabel "while_exit"
+  emit (IR.LABEL lh)
+  cond <- codegenExp e
+  emit (IR.CJUMP cond lb lf)
+  emit (IR.LABEL lb)
+  mapM_ codegenStmt body
+  emit (IR.JUMP (IR.NAME lh))
+  emit (IR.LABEL lf)
+\end{minted}
+
+A implementação segue fielmente o esquema da Seção~\ref{sec:sdt-control}:
+
+\begin{center}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{ll}
+    \toprule
+    Instrução emitida & Papel \\
+    \midrule
+    \texttt{LABEL lh}            & Cabeça do laço; destino do salto
+    de retorno \\
+    \texttt{CJUMP(cond, lb, lf)} & Avalia a condição; entra no corpo ou sai \\
+    \texttt{LABEL lb}            & Início do corpo \\
+    \textit{corpo}               & Instruções geradas recursivamente \\
+    \texttt{JUMP(NAME lh)}       & Fecha o laço, volta ao teste \\
+    \texttt{LABEL lf}            & Ponto de saída do laço \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\subsubsection*{Condicional \texttt{if-else}}
+
+\begin{minted}{haskell}
+codegenStmt (SIf e b1 b2) = do
+  lt <- freshLabel "if_true"
+  lf <- freshLabel "if_false"
+  le <- freshLabel "if_end"
+  cond <- codegenExp e
+  emit (IR.CJUMP cond lt lf)
+  emit (IR.LABEL lt)
+  mapM_ codegenStmt b1
+  emit (IR.JUMP (IR.NAME le))
+  emit (IR.LABEL lf)
+  mapM_ codegenStmt b2
+  emit (IR.LABEL le)
+\end{minted}
+
+O \texttt{JUMP(NAME le)} ao final do ramo \emph{then} é essencial: sem ele a
+execução ``cairia'' para o ramo \emph{else} após concluir o ramo verdadeiro.
+
+\subsection{Geração de Expressões}\label{sec:ir-impl-exprs}
+
+A função \texttt{codegenExp} implementa $\mathcal{E}\llbracket \cdot
+\rrbracket$ e devolve um \texttt{IR.Expr}:
+
+\begin{minted}{haskell}
+codegenExp :: Exp -> CgM IR.Expr
+codegenExp (EInt n)      = return (IR.CONST n)
+codegenExp (EBool True)  = return (IR.CONST 1)
+codegenExp (EBool False) = return (IR.CONST 0)
+codegenExp (EString _)   = return (IR.CONST 0)
+codegenExp (EVar v)      = return (IR.TEMP v)
+
+codegenExp (e1 :+: e2)  = IR.BINOP IR.BAdd <$> codegenExp e1 <*> codegenExp e2
+codegenExp (e1 :*: e2)  = IR.BINOP IR.BMul <$> codegenExp e1 <*> codegenExp e2
+codegenExp (e1 :-: e2)  = IR.BINOP IR.BSub <$> codegenExp e1 <*> codegenExp e2
+codegenExp (e1 :/: e2)  = IR.BINOP IR.BDiv <$> codegenExp e1 <*> codegenExp e2
+codegenExp (e1 :<: e2)  = IR.BINOP IR.BLt  <$> codegenExp e1 <*> codegenExp e2
+codegenExp (e1 :=: e2)  = IR.BINOP IR.BEq  <$> codegenExp e1 <*> codegenExp e2
+
+codegenExp (e1 :&&: e2) = IR.BINOP IR.BAnd <$> codegenExp e1 <*> codegenExp e2
+codegenExp (e1 :||: e2) = IR.BINOP IR.BOr  <$> codegenExp e1 <*> codegenExp e2
+
+codegenExp (Not e) = IR.BINOP IR.BEq (IR.CONST 0) <$> codegenExp e
+\end{minted}
+
+Dois pontos merecem atenção:
+
+\begin{itemize}
+  \item \textbf{Booleanos.}  \texttt{true} compila para \texttt{CONST(1)} e
+    \texttt{false} para \texttt{CONST(0)}.  Como os únicos valores booleanos
+    são $0$ e $1$, os operadores bit a bit \texttt{AND} e \texttt{OR}
+    coincidem com os conectivos lógicos \texttt{\&\&} e \texttt{||}.
+  \item \textbf{Negação lógica.}  A expressão \texttt{not~e} é traduzida para
+    $\mathbf{BINOP}(\mathtt{EQ},\; \mathbf{CONST}(0),\;
+    \mathcal{E}\llbracket e \rrbracket)$:
+    se $e$ avalia para $0$ (falso), o resultado é $1$; se avalia para $1$
+    (verdadeiro), o resultado é $0$.
+  \item \textbf{Strings.}  A IRT é inteiramente inteira; strings não têm
+    representação direta e são compiladas para \texttt{CONST(0)} como
+    aproximação conservadora.
+\end{itemize}
+
+\subsection{Exemplo: Fatorial Iterativo}\label{sec:ir-impl-example}
+
+O programa TWhile abaixo computa $5!$ de forma iterativa:
+
+\begin{minted}{text}
+let n : int := 5;
+let acc : int := 1;
+while n > 0 {
+    acc := acc * n;
+    n := n - 1;
+}
+print acc;
+\end{minted}
+
+Após a invocação de \texttt{compileTWhile}, o código IRT gerado é (com rótulos
+renomeados para clareza):
+
+\begin{minted}{text}
+func main() {
+  MOVE(TEMP(n),   CONST(5))
+  MOVE(TEMP(acc), CONST(1))
+  LABEL(while_head)
+  CJUMP(BINOP(LT, CONST(0), TEMP(n)), while_body, while_exit)
+  LABEL(while_body)
+    MOVE(TEMP(acc), BINOP(MUL, TEMP(acc), TEMP(n)))
+    MOVE(TEMP(n),   BINOP(SUB, TEMP(n),   CONST(1)))
+    JUMP(NAME(while_head))
+  LABEL(while_exit)
+  EXP(CALL(NAME(print), TEMP(acc)))
+}
+\end{minted}
+
+A saída é uma função \texttt{main} sem parâmetros cuja sequência de
+instruções espelha diretamente a estrutura do programa fonte.
+
+\subsection{Integração no Pipeline}\label{sec:ir-impl-pipeline}
+
+O executável \texttt{twhile} expõe a opção \texttt{--ir}:
+
+\begin{minted}{text}
+twhile --ir -f programa.tw
+\end{minted}
+
+O pipeline executa as seguintes etapas em ordem:
+\begin{enumerate}
+  \item \textbf{Análise sintática:} o parser produz a AST de TWhile.
+  \item \textbf{Verificação de tipos:} o analisador semântico valida a AST
+    e devolve o contexto de tipos final.
+  \item \textbf{Geração de código:} \texttt{compileTWhile} converte a AST
+    verificada em um \texttt{IR.Program}.
+  \item \textbf{Impressão:} o módulo \texttt{IR.Frontend.Pretty.IRPretty}
+    serializa o programa IRT para texto e o resultado é escrito num arquivo
+    \texttt{.ir} com o mesmo nome base do arquivo fonte.
+\end{enumerate}
+
+O arquivo \texttt{.ir} gerado pode então ser interpretado diretamente pelo
+executável \texttt{ir --interp}, fechando o ciclo
+\emph{fonte} $\to$ \emph{IRT} $\to$ \emph{execução}.
+
+% ============================================================
+\section{Geração de Código para TImp: Funções e Registros}
+\label{sec:ir-timp}
+% ============================================================
+
+A linguagem TImp estende TWhile com \textbf{declarações de funções} e
+\textbf{tipos registro}. O \emph{backend} correspondente encontra-se em
+\texttt{TImp.Backend.IR.TImpCodegen} e herda toda a estrutura de TWhile,
+acrescentando:
+
+\begin{enumerate}
+  \item regras de tradução para acesso e atribuição de campos;
+  \item uma regra de alocação para a construção de registros;
+  \item a tradução de cada declaração de função para um fragmento
+    \texttt{FuncDef} distinto;
+  \item propagação do comando \texttt{return} via \texttt{RETURN}.
+\end{enumerate}
+
+% ------------------------------------------------------------
+\subsection{Representação de Registros na Memória}
+\label{sec:ir-record-layout}
+% ------------------------------------------------------------
+
+Registros são alocados no \textbf{heap} como blocos contíguos de palavras
+de 64 bits (\(w = 8\) bytes). Os campos são numerados pela ordem de
+declaração, a partir de 0. O campo de índice \(i\) de um registro cujo
+endereço base está em \(\mathbf{TEMP}(x)\) está no endereço:
+
+\[
+  \mathit{addr}(x, i) = \mathbf{BINOP}(\mathtt{ADD},\; \mathbf{TEMP}(x),\;
+  \mathbf{CONST}(i \cdot w))
+\]
+
+\begin{remark}
+  A constante \(w\) denota o \textbf{tamanho de palavra} (\emph{word size})
+  em bytes: o espaço ocupado por um único campo na memória.  Em arquiteturas
+  de 64 bits, \(w = 8\).  Multiplicar o índice \(i\) por \(w\) converte um
+  índice lógico de campo em um \textbf{deslocamento de byte} (\emph{byte
+  offset}) a partir do endereço base do registro.
+\end{remark}
+
+Para um registro \texttt{Point \{ x : int; y : int \}}, o campo \texttt{x}
+tem índice 0 (deslocamento \(0 \cdot 8 = 0\) bytes) e o campo \texttt{y}
+tem índice 1 (deslocamento \(1 \cdot 8 = 8\) bytes). Não há cabeçalho de
+tipo: a distinção de tipo é responsabilidade do sistema de tipos estático.
+
+A alocação é realizada pela função embutida \texttt{alloc}, chamada com
+o número de campos como argumento. O interpretador IRT implementa
+\texttt{alloc} via um alocador \emph{bump-pointer} iniciado num endereço
+fixo alto:
+
+\begin{minted}{haskell}
+callFunc _ (NAME "alloc") [n] = do
+  ptr <- gets heapPtr
+  modify (\s -> s { heapPtr = ptr + n * 8 })
+  return ptr
+\end{minted}
+
+% ------------------------------------------------------------
+\subsection{Tradução Dirigida por Sintaxe para Registros}
+\label{sec:ir-record-sdt}
+% ------------------------------------------------------------
+
+\subsubsection*{Construção de Registro}
+
+Seja \(R\) declarado com campos \((f_0,\ldots,f_{n-1})\) em ordem. A
+expressão \(\mathbf{new}\; R\;\{f_0\!=\!e_0,\ldots,f_{n-1}\!=\!e_{n-1}\}\)
+é traduzida para:
+
+\[
+  \mathcal{E}\llbracket \mathbf{new}\; R\;\{\overline{f_i\!=\!e_i}\} \rrbracket
+  = \mathbf{ESEQ}(s_{\mathit{alloc}},\; \mathbf{TEMP}(t))
+\]
+
+onde \(t\) é um novo temporário e \(s_{\mathit{alloc}}\) é o bloco de
+alocação e inicialização dos campos:
+
+\[
+  \begin{aligned}
+    s_{\mathit{alloc}}
+    &= \mathbf{SEQ}( \\
+      &\quad \mathbf{MOVE}(\mathbf{TEMP}(t),\;
+      \mathbf{CALL}(\mathbf{NAME}(\texttt{alloc}),\; \mathbf{CONST}(n))), \\
+      &\quad \mathbf{SEQ}( \\
+        &\qquad \mathbf{MOVE}(\mathbf{MEM}(\mathit{addr}(t,0)),\;
+        \mathcal{E}\llbracket e_0 \rrbracket), \\
+        &\qquad \cdots \\
+        &\qquad \mathbf{MOVE}(\mathbf{MEM}(\mathit{addr}(t,n-1)),\;
+    \mathcal{E}\llbracket e_{n-1} \rrbracket)))
+  \end{aligned}
+\]
+
+O bloco \(s_{\mathit{alloc}}\) aloca
+\(n\) palavras, armazena os valores dos campos em ordem e o
+\(\mathbf{ESEQ}\) devolve \(\mathbf{TEMP}(t)\) como endereço do registro
+recém-criado.
+
+\subsubsection*{Acesso a Campo}
+
+Dado que \(e\) tem tipo \(R\) e \(f\) tem índice \(i\) em \(R\):
+
+\[
+  \mathcal{E}\llbracket e.f \rrbracket =
+  \mathbf{MEM}\!\left(
+    \mathbf{BINOP}(\mathtt{ADD},\;
+      \mathcal{E}\llbracket e \rrbracket,\;
+    \mathbf{CONST}(i \cdot w))
+  \right)
+\]
+
+Tal como o acesso a componente de tupla (Seção~\ref{sec:sdt-expr}), o
+índice é convertido em deslocamento de byte.
+
+\subsubsection*{Atribuição a Campo}
+
+\[
+  \mathcal{S}\llbracket x.f \mathbin{:=} e \rrbracket =
+  \mathbf{MOVE}\!\left(
+    \mathbf{MEM}\!\left(
+      \mathbf{BINOP}(\mathtt{ADD},\;
+        \mathbf{TEMP}(x),\;
+      \mathbf{CONST}(i \cdot w))
+    \right),\;
+    \mathcal{E}\llbracket e \rrbracket
+  \right)
+\]
+
+A semântica de valor de TImp é preservada: esta instrução \emph{não} cria
+uma cópia do registro; atualiza o campo \(f\) no bloco já alocado, pois a
+variável \(x\) detém o \emph{endereço} do registro. (A cópia ocorre apenas
+  quando uma variável do tipo registro é passada como argumento ou atribuída
+  a outra variável, ponto em que o \emph{front-end} pode inserir chamadas a
+  \texttt{alloc}; na IRT, toda passagem de registro é por referência implícita
+via o temporário que guarda o endereço.)
+
+% ------------------------------------------------------------
+\subsection{Tradução de Funções}
+\label{sec:ir-timp-fn}
+% ------------------------------------------------------------
+
+Cada declaração de função
+\(\mathbf{fn}\; f(\overline{x_i : \tau_i}) : \rho\; \{B\}\)
+torna-se um \texttt{FuncDef} independente:
+
+\[
+  \mathcal{F}\llbracket \mathbf{fn}\; f(\overline{x_i:\tau_i}):\rho\;\{B\}
+  \rrbracket
+  = \mathtt{FuncDef}\; f\; [x_1,\ldots,x_n]\;
+  (\mathit{foldStmts}(\mathcal{S}\llbracket B \rrbracket))
+\]
+
+Os nomes dos parâmetros formais \(x_i\) são usados diretamente como
+temporários no corpo, o que é correto porque o interpretador IRT inicializa
+\(\mathbf{TEMP}(x_i) = v_i\) no estado local de cada chamada:
+não há prólogo de cópia de argumentos.
+
+As regras de tradução para \textbf{return} são:
+
+\[
+  \mathcal{S}\llbracket \mathbf{return}\; e \mathtt{;} \rrbracket =
+  \mathbf{RETURN}(\mathcal{E}\llbracket e \rrbracket)
+  \qquad
+  \mathcal{S}\llbracket \mathbf{return} \mathtt{;} \rrbracket =
+  \mathbf{RETURN}()
+\]
+
+Chamadas de função como expressão traduzem-se como antes:
+\[
+  \mathcal{E}\llbracket f(e_1,\ldots,e_n) \rrbracket =
+  \mathbf{CALL}(\mathbf{NAME}(f),\;
+    \mathcal{E}\llbracket e_1 \rrbracket,\;\ldots,\;
+  \mathcal{E}\llbracket e_n \rrbracket)
+\]
+
+% ------------------------------------------------------------
+\subsection{Implementação em Haskell}
+\label{sec:ir-timp-impl}
+% ------------------------------------------------------------
+
+\subsubsection*{Estado Estendido da Geração de Código}
+
+O estado de TWhile é estendido com dois campos adicionais:
+
+\begin{minted}{haskell}
+data CgState = CgState
+  { nextLabel  :: Int
+  , nextTemp   :: Int
+  , stmtAcc    :: [IR.Stmt]
+  , recFields  :: Map Name [Field]   -- ordem de campos por tipo R
+  , varTypes   :: Map Var Ty         -- tipo de cada variavel local
+  }
+\end{minted}
+
+\begin{itemize}
+  \item \texttt{recFields} mapeia o nome de cada tipo registro à lista
+    ordenada de seus campos. Permite calcular o índice \(i\) de um campo
+    \(f\) em \(O(\log n)\) com \texttt{elemIndex}.
+  \item \texttt{varTypes} rastreia o tipo TImp de cada variável declarada.
+    É necessário para traduzir \texttt{EField} e \texttt{SFieldAssign}: o
+    nome do tipo registro deve ser recuperado para consultar
+    \texttt{recFields}.
+  \item \texttt{nextTemp} fornece novos temporários para a construção de
+    registros, evitando colisões com os nomes de variáveis do programa.
+\end{itemize}
+
+O estado inicial é construído com \texttt{recFields} já preenchido e
+\texttt{varTypes} vazio (as variáveis são inseridas à medida que as
+declarações são processadas):
+
+\begin{minted}{haskell}
+initState :: Map Name [Field] -> CgState
+initState rf = CgState 0 0 [] rf Map.empty
+\end{minted}
+
+\subsubsection*{Ponto de Entrada}
+
+\begin{minted}{haskell}
+compileTImp :: TImp -> Either String IR.Program
+compileTImp (TImp decls stmts) = do
+  let rf = Map.fromList
+            [ (n, [f | FieldDecl f _ <- fields])
+            | DRecord (RecordDecl n fields) <- decls ]
+  funcDefs <- mapM (compileFuncDecl rf) [fd | DFunc fd <- decls]
+  mainStmts <- runCgM rf (mapM_ codegenStmt stmts)
+  let mainDef = IR.FuncDef "main" [] (foldStmts mainStmts)
+  pure (funcDefs ++ [mainDef])
+\end{minted}
+
+O mapa \texttt{rf} é construído uma vez a partir das declarações de tipo.
+Cada função é compilada independentemente por \texttt{compileFuncDecl};
+os comandos de nível superior são colocados numa função \texttt{main}
+implícita.
+
+\subsubsection*{Compilação de Declarações de Função}
+
+\begin{minted}{haskell}
+compileFuncDecl :: Map Name [Field] -> FuncDecl
+                -> Either String IR.FuncDef
+compileFuncDecl rf (FuncDecl name params _ body) = do
+  let paramNames = [v | Param v _ <- params]
+      paramTypes = [(v, t) | Param v t <- params]
+  stmts <- runCgM rf $ do
+    mapM_ (uncurry trackVar) paramTypes  -- preenche varTypes
+    mapM_ codegenStmt body
+  pure (IR.FuncDef name paramNames (foldStmts stmts))
+\end{minted}
+
+Os tipos dos parâmetros são pré-carregados em \texttt{varTypes} antes de
+iniciar a geração do corpo. Sem isso, um acesso \texttt{p.x} dentro da
+função não conseguiria determinar o tipo de \texttt{p}.
+
+\subsubsection*{Geração de Comandos: Novos Casos}
+
+\textbf{Declaração de variável tipada} (rastreia o tipo para uso futuro):
+
+\begin{minted}{haskell}
+codegenStmt (SDecl v t e) = do
+  ir <- codegenExp e
+  emit (IR.MOVE (IR.TEMP v) ir)
+  trackVar v t           -- insere v -> t em varTypes
+\end{minted}
+
+\textbf{Atribuição a campo} (implementa a regra $\mathcal{S}[x.f:=e]$):
+
+\begin{minted}{haskell}
+codegenStmt (SFieldAssign v f e) = do
+  vts <- gets varTypes
+  case Map.lookup v vts of
+    Nothing -> throwError ("Unknown variable type for " ++ v)
+    Just (TRecord rname) -> do
+      i   <- fieldIndex rname f         -- indice i do campo f em R
+      rhs <- codegenExp e
+      let addr = IR.BINOP IR.BAdd (IR.TEMP v) (IR.CONST (i * wordSize))
+      emit (IR.MOVE (IR.MEM addr) rhs)
+    Just t -> throwError (v ++ " is not a record (type: " ++ show t ++ ")")
+\end{minted}
+
+\textbf{Retorno com e sem valor}:
+
+\begin{minted}{haskell}
+codegenStmt (SReturn Nothing)  = emit (IR.RETURN [])
+codegenStmt (SReturn (Just e)) = do
+  ir <- codegenExp e
+  emit (IR.RETURN [ir])
+\end{minted}
+
+\textbf{Chamada de função como comando}:
+
+\begin{minted}{haskell}
+codegenStmt (SCall fname args) = do
+  argIRs <- mapM codegenExp args
+  emit (IR.EXP (IR.CALL (IR.NAME fname) argIRs))
+\end{minted}
+
+O valor de retorno é descartado via \texttt{EXP}, tal como em TWhile.
+
+\subsubsection*{Geração de Expressões: Novos Casos}
+
+\textbf{Acesso a campo} (implementa a regra $\mathcal{E}[e.f]$, restrito
+a \texttt{EVar} para simplificar):
+
+\begin{minted}{haskell}
+codegenExp (EField (EVar v) f) = do
+  vts <- gets varTypes
+  case Map.lookup v vts of
+    Nothing -> throwError ("Unknown variable type for " ++ v)
+    Just (TRecord rname) -> do
+      i <- fieldIndex rname f
+      let addr = IR.BINOP IR.BAdd (IR.TEMP v)
+                   (IR.CONST (i * wordSize))
+      pure (IR.MEM addr)
+    Just t -> throwError (v ++ " has non-record type " ++ show t)
+
+codegenExp (EField _ _) =
+  throwError "Field access on non-variable not supported in IR codegen"
+\end{minted}
+
+A restrição a \texttt{EVar} é conservadora mas correta para todos os
+programas produzidos pelo \emph{front-end}: o verificador de tipos garante
+que o receptor de um acesso a campo é bem tipado, e a expressão mais
+comum é de facto uma variável. Expressões aninhadas como
+\texttt{f().x} exigiriam um temporário intermediário.
+
+\textbf{Construção de registro} (implementa a regra
+$\mathcal{E}[\mathbf{new}\;R\{\ldots\}]$):
+
+\begin{minted}{haskell}
+codegenExp (ENew rname initFields) = do
+  rf <- gets recFields
+  case Map.lookup rname rf of
+    Nothing   -> throwError ("Unknown record type: " ++ rname)
+    Just flds -> do
+      let n = length flds
+      t <- freshTemp
+      -- avalia campos na ordem de declaracao (nao na ordem fornecida)
+      fieldVals <- mapM (lookupFieldVal initFields) flds
+      let allocStmt  = IR.MOVE (IR.TEMP t)
+                         (IR.CALL (IR.NAME "alloc") [IR.CONST n])
+          fieldStmts = [ IR.MOVE
+                           (IR.MEM (IR.BINOP IR.BAdd
+                             (IR.TEMP t) (IR.CONST (i * wordSize)))) v
+                       | (i, v) <- zip [0..] fieldVals ]
+      pure (IR.ESEQ (foldStmts (allocStmt : fieldStmts)) (IR.TEMP t))
+  where
+    lookupFieldVal pairs f =
+      case lookup f pairs of
+        Nothing -> throwError ("Missing field " ++ f)
+        Just e  -> codegenExp e
+\end{minted}
+
+Três aspectos merecem atenção:
+
+\begin{itemize}
+  \item Os campos são avaliados na \textbf{ordem de declaração} de \(R\)
+    (lista \texttt{flds}), não na ordem em que o programador os escreveu.
+    Isso garante que o deslocamento \(i \cdot w\) está correto
+    independentemente da ordem de inicialização.
+  \item O temporário \(t\) é gerado por \texttt{freshTemp} (contador
+    \texttt{nextTemp}), que produz nomes como \texttt{\_t0}, \texttt{\_t1},
+    distintos dos nomes de variáveis do programa.
+  \item A chamada a \texttt{alloc} recebe \texttt{CONST(n)}, o número
+    de campos, e não o número de bytes. O interpretador IRT multiplica
+    por \(w\) internamente.
+\end{itemize}
+
+% ------------------------------------------------------------
+\subsection{Exemplo Completo}
+\label{sec:ir-timp-example}
+% ------------------------------------------------------------
+
+Considere o programa TImp:
+
+\begin{minted}{text}
+record Point { x : int; y : int; }
+fn soma(p : Point) : int {
+  return p.x + p.y;
+}
+var q : Point = new Point { x = 3, y = 4 };
+print soma(q);
+\end{minted}
+
+Após \texttt{compileTImp}, o código IRT gerado é:
+
+\begin{minted}{text}
+func soma(p) {
+  RETURN(BINOP(ADD,
+    MEM(BINOP(ADD, TEMP(p), CONST(0))),   -- p.x  (indice 0)
+    MEM(BINOP(ADD, TEMP(p), CONST(8))))) -- p.y  (indice 1)
+}
+func main() {
+  SEQ(
+    MOVE(TEMP(q),                         -- var q = new Point{x=3,y=4}
+      ESEQ(
+        SEQ(MOVE(TEMP(_t0), CALL(NAME(alloc), CONST(2))),
+            SEQ(MOVE(MEM(BINOP(ADD, TEMP(_t0), CONST(0))), CONST(3)),
+                MOVE(MEM(BINOP(ADD, TEMP(_t0), CONST(8))), CONST(4)))),
+        TEMP(_t0))),
+    EXP(CALL(NAME(print),                 -- print soma(q)
+          CALL(NAME(soma), TEMP(q)))))
+}
+\end{minted}
+
+Pontos a observar:
+
+\begin{itemize}
+  \item A função \texttt{soma} produz um \texttt{FuncDef} independente com
+    parâmetro \texttt{p}. Os acessos \texttt{p.x} e \texttt{p.y} tornam-se
+    \texttt{MEM} com deslocamentos 0 e 8.
+  \item O registro é alocado com \texttt{alloc(2)} e o endereço base fica
+    em \texttt{TEMP(\_t0)}. Os dois campos são inicializados em seguida.
+  \item A chamada \texttt{soma(q)} passa o endereço do registro (o valor
+    inteiro em \texttt{TEMP(q)}) como argumento; dentro de \texttt{soma},
+    \texttt{TEMP(p)} contém esse endereço.
+  \item O resultado de \texttt{soma(q)} é usado diretamente como argumento
+    de \texttt{print}, sem temporário intermediário (a canonicalização
+    extrairia essa chamada embutida se necessário).
+\end{itemize}
+
+% ============================================================
+\section{Conclusão}\label{sec:ir-conclusao}
+
+A representação intermediária em árvore (IRT) introduzida neste capítulo
+satisfaz os critérios de simplicidade, independência de máquina e suporte a
+transformações enunciados na Seção~\ref{sec:ir-desiderata}.
+A semântica big-step formaliza o comportamento de cada construtor,
+permitindo raciocinar com rigor sobre a correção das traduções.
+As regras de tradução dirigida por sintaxe cobrem todas as construções de
+TWhile e TImp e são estruturalmente indutivas sobre a AST, o que facilita
+tanto a implementação quanto a prova de corretude.
+
+Os próximos passos na cadeia de compilação são:
+\begin{itemize}
+  \item \textbf{Canonicalização e formação de blocos básicos:}
+    preparar a IRT linearizada para análise de fluxo.
+  \item \textbf{Otimizações sobre a RI:}
+    propagação de constantes, eliminação de código morto,
+    movimentação de código invariante.
+  \item \textbf{Seleção de instruções:}
+    mapear construções da IRT para instruções da arquitetura-alvo
+    (e.g., x86-64 ou WebAssembly).
+  \item \textbf{Alocação de registradores:}
+    decidir, para cada temporário, se ele vive em um registrador físico
+    ou em uma posição da pilha.
+\end{itemize}

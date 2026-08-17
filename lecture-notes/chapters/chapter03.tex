@@ -1,0 +1,1085 @@
+\chapter{Análise léxica baseada em expressões regulares}
+
+\section{Introdução}
+
+No capítulo anterior, apresentamos um analisador léxico ad-hoc para
+uma linguagem simples. Ao tentarmos estender a linguagem considerada
+com construções simples com identificadores ou comentários,
+encontraremos problemas: temos que modificar a estrutura do estado do
+analisador léxico para acomodar uma string para acumular caracteres
+que formam um possível identificador e modificar toda a estrutura do
+analisador para lidar com comentários de linha / blocos.
+
+Diante desta situação, temos a seguinte pergunta: existe uma forma
+extensível e eficiente para a construção de analisadores léxicos?
+Neste capítulo, veremos que a teoria de expressões regulares e
+autômatos finitos provêem uma solução eficiente e automatizável para
+a criação de analisadores léxicos.
+
+Neste capítulo, vamos revisar a teoria de autômatos, expressões
+regulares, a implementação de algoritmos e como estes podem ser
+combinados para a criação de analisadores léxicos para uma
+especificação de tokens usando expressões regulares.
+
+\section{Autômatos finitos determinísticos}
+
+Nesta seção, vamos apresentar uma implementação simples de autômatos
+finitos determinísticos e de operações sobre estes.
+
+\begin{Definition}
+  Um autômato finito determinístico M pode ser entendido
+  como uma quíntupla \(M = (E,\Sigma, \delta, i, F)\), em que:
+
+  \begin{itemize}
+    \item
+      \(E\): conjunto finito de estados;
+    \item
+      \(\Sigma\): alfabeto;
+    \item
+      \(\delta : E \times \Sigma \to E\), função de transição;
+    \item
+      \(i \in E\): estado inicial;
+    \item
+      \(F \subseteq E\): conjunto de estados finais.
+  \end{itemize}
+\end{Definition}
+
+De maneira simples, o tipo \haskell{DFA} é
+parametrizado pelo tipo de estados e possui 3 campos para representar
+o estado inicial (campo \haskell{start}), a função de
+transição (campo \haskell{delta}) e uma função para
+determinar se um estado é final ou não (campo \haskell{finals}).
+
+\begin{minted}{haskell}
+data DFA a
+  = DFA {
+      start :: a
+    , delta :: a -> Char -> a
+    , finals :: a -> Bool
+    }
+\end{minted}
+
+Como um exemplo, considere o seguinte autômato que aceita palavras
+que terminam em 1.
+
+\begin{figure}[H]
+  \begin{tikzpicture}[
+      shorten >=1pt,
+      node distance=3cm,
+      on grid,
+      >={Stealth[round]},
+      every state/.style={draw, minimum size=12mm, font=\small},
+      accepting/.style={double, double distance=1.5pt},
+    ]
+
+    \node[state, initial, initial text={}]             (q0) {$q_0$};
+    \node[state, accepting, right=of q0] (q1) {$q_1$};
+
+    \path[->]
+    (q0) edge [loop above]  node {0} ()
+    (q0) edge [bend left]   node [above] {1} (q1)
+    (q1) edge [bend left]   node [below] {0} (q0)
+    (q1) edge [loop above]  node {1} ();
+
+  \end{tikzpicture}
+  \centering
+\end{figure}
+
+Esse mesmo autômato pode ser representado pelo seguinte valor em Haskell:
+
+\begin{minted}{haskell}
+endsWithOne :: DFA Bool
+endsWithOne = DFA False transition id
+    where
+        transition False '0' = False
+        transition False '1' = True
+        transition True  '0' = False
+        transition True  '1' = True
+        transition _ _ = False
+\end{minted}
+
+Aqui representamos o conjunto de estados utilizando o tipo
+\haskell{Bool}. O estado inicial é codificado por
+\haskell{False} e o estado final por
+\haskell{True}. A função de transição é representada
+por casamento de padrão sobre o estado e o caractere processado. A
+função para identificar o estado final é a função identidade,
+\haskell{id}.
+
+O cálculo do estado em que a computação de uma string termina em um
+AFD é feita percorrendo a string utilizando a função de transição de
+forma direta:
+
+\begin{minted}{haskell}
+deltaStar :: DFA a -> String -> a
+deltaStar m = foldl (delta m) (start m)
+\end{minted}
+
+que permite a definição direta de uma função para verificar se uma
+palavra pertence ou não a linguagem descrita por um autômato por
+testar se o estado retornado por \haskell{deltaStar} é final.
+
+\begin{minted}{haskell}
+accept :: DFA a -> String -> Bool
+accept m s = finals m (deltaStar m s)
+\end{minted}
+
+Evidentemente, em analisadores léxicos devemos utilizar
+\textbf{autômatos mínimos}, visto que estes evitam a utilização de
+espaço desnecessário por utilizar a menor quantidade possível para
+seu conjunto de estados. A implementação de algoritmos de minimização
+está disponível no repositório de código associado a este material. O
+leitor interessado pode consultar esses detalhes on-line.
+
+\section{Autômatos finitos não determinísticos}
+
+Nesta seção, vamos apresentar uma implementação simples de autômatos
+finitos não determinísticos e de operações sobre estes. A seguir,
+apresentamos a descrição formal de autômatos não determinísticos.
+
+\begin{Definition}
+  Um autômato finito não determinístico M pode ser
+  entendido como uma quíntupla \(M = (E,\Sigma, \delta, I, F)\), em que:
+
+  \begin{itemize}
+    \item
+      \(E\): conjunto finito de estados;
+    \item
+      \(\Sigma\): alfabeto;
+    \item
+      \(\delta : E \times \Sigma \to \mathcal{P}(E)\), função de transição;
+    \item
+      \(I \subseteq E\): conjunto de estados iniciais;
+    \item
+      \(F \subseteq E\): conjunto de estados finais.
+  \end{itemize}
+\end{Definition}
+
+Para representação de um autômato não determinístico, vamos
+representar de maneira explícita o conjunto de estados do autômato. A
+função de transição retorna um conjunto de estados para representar a
+possibilidade dos diversos resultados de uma transição em um AFN.
+
+\begin{minted}{haskell}
+data NFA a
+  = NFA {
+      numberOfStates :: Int
+    , nfaStart :: Set a
+    , nfaDelta :: a -> Char -> Set a
+    , nfaFinals :: Set a
+    }
+\end{minted}
+
+Como um exemplo, considere o seguinte AFN que aceita a linguagem de
+palavras que terminam em 00:
+\begin{figure}[H]
+  \begin{tikzpicture}[
+      shorten >=1pt,
+      node distance=3cm,
+      on grid,
+      >={Stealth[round]},
+      every state/.style={draw, minimum size=12mm, font=\small},
+      accepting/.style={double, double distance=1.5pt},
+    ]
+
+    \node[state, initial, initial text={}]                (q0) {$q_0$};
+    \node[state, right=of q0]           (q1) {$q_1$};
+    \node[state, accepting, right=of q1] (q2) {$q_2$};
+
+    \path[->]
+    (q0) edge [loop above] node {0, 1} ()
+    (q0) edge              node [above] {0} (q1)
+    (q1) edge              node [above] {0} (q2);
+
+  \end{tikzpicture}
+  \centering
+\end{figure}
+
+este é representado pelo seguinte valor do tipo \haskell{NFA Int}:
+
+\begin{minted}{haskell}
+endsWith00 :: NFA Int
+endsWith00
+    = NFA 3 (Set.singleton 0)
+            (\ s c -> case (s,c) of
+                        (0, '0') -> Set.fromList [0,1]
+                        (0, '1') -> Set.singleton 0
+                        (1, '0') -> Set.singleton 2
+                        _        -> Set.empty)
+            (Set.singleton 2)
+\end{minted}
+
+Note que a função de transição é codificada por um par formado por um
+estado e o caractere a ser processado pela transição. Os conjuntos de
+estados iniciais e finais são representados utilizando a função
+\haskell{Set.singleton} que cria um conjunto unitário
+com o elemento fornecido como argumento. A definição de aceitação de
+uma palavra é similar à de AFDs e está implementada no código de
+suporte deste material.
+
+A definição seguinte revisa a equivalência entre AFNs e AFDs.
+
+\begin{Definition}
+  Seja $M = (E,\Sigma, \delta, I, F)$ um autômato
+  finito não determinístico qualquer. O AFD equivalente a $M$ é
+  $M' = (\mathcal{P}(E),\Sigma,\delta',I,F')$, em que:
+
+  \begin{itemize}
+    \item
+      \(\delta' : \mathcal{P}(E) \times \Sigma \to \mathcal{P}(E)\),
+      função de transição;
+    \item
+      \(I \in \mathcal{P}(E)\): estado inicial;
+    \item
+      \(F' =\{X \,|\, X \cap F \neq \emptyset\}\): conjunto de estados finais.
+  \end{itemize}
+
+  De maneira simples, no AFD equivalente cada estado representa um
+  conjunto de estados do AFN. O estado inicial do AFD é apenas o
+  conjunto de estados iniciais do AFN e o conjunto de estados finais
+  é qualquer conjunto de estados que possui algum estado final do AFN.
+\end{Definition}
+
+A partir da definição anterior, podemos codificar uma função que
+transforma um AFN qualquer em um AFD equivalente.
+
+\begin{minted}{haskell}
+subset :: Ord a => NFA a -> DFA (Set a)
+subset m
+  = DFA {
+      start  = nfaStart m
+    , delta  = \ es c ->
+        Set.unions (map (flip (nfaDelta m) c) (Set.elems es))
+    , finals = \ es -> not (disjoint es (nfaFinals m))
+    }
+\end{minted}
+
+Observe que a função mostra que se o AFN possui estados de tipo
+\haskell{a}, o AFD equivalente terá estados de tipo
+\haskell{Set a}, isto é, conjuntos de estados de tipo
+\haskell{a}. O estado inicial do AFD é definido como
+o estado inicial do AFN, \haskell{nfaStart m}.
+Estados finais são definidos por uma função que verifica se o
+argumento possui algum estado final do AFN\footnote{A função
+  \haskell{disjoint} retorna verdadeiro se a interseção
+entre dois conjuntos é vazia.}.
+
+\section{Expressões regulares}
+
+Uma abordagem mais declarativa para análise léxica consiste em
+definir os tokens válidos usando expressões regulares e, em seguida,
+sintetizar automaticamente o analisador léxico a partir dessas
+expressões regulares. Essa abordagem é simples e tem maior
+probabilidade de resultar em código eficiente e de fácil manutenção.
+
+Para iniciar, vamos rever a definição da sintaxe de expressões
+regulares e de sua semântica.
+
+\begin{Definition}
+  Expressões regulares são definidas pela seguinte
+  gramática livres de contexto: \[
+    \begin{array}{l}
+      e \to \emptyset\,|\,\lambda\,|\,a\,|\,e e\,|\,e + e\,|\,e^\star
+    \end{array}
+  \] Uma expressão regular \(e\) denota um conjunto de strings
+  chamado linguagem de \(e\), escrita \(L(e)\), que é definida
+  recursivamente como: \[
+    \begin{array}{lcl}
+      L(\emptyset) & = & \emptyset\\
+      L(\lambda) & = & \{\lambda\}\\
+      L(a)        & = & \{a\}\\
+      L(e_1 e_2)  & = & L(e_1)L(e_2)\\
+      L(e_1 + e_2) & = & L(e_1) \cup L(e_2)\\
+      L(e^\star)  & = & L(e)^\star
+    \end{array}
+  \]
+\end{Definition}
+
+Existem diversas maneiras para converter uma expressão regular em um
+autômato equivalente. Primeiro, vamos revisar uma abordagem que
+produz um AFN equivalente por recursão sobre a estrutura da expressão regular.
+
+\begin{Definition}[Construção de Thompson]
+  Seja \(e\) uma
+  expressão regular arbitrária. O AFN equivalente a \(e\), \(M\), é
+  definido por recursão sobre a estrutura de \(e\):
+
+  Caso \(e = \emptyset\): O AFN \(M\) equivalente é
+
+  \begin{figure}[H]
+    \begin{tikzpicture}[
+        shorten >=1pt,
+        node distance=3cm,
+        on grid,
+        >={Stealth[round]},
+        every state/.style={draw, minimum size=12mm, font=\small},
+      ]
+      \node[state, initial, initial text={}] (q0) {$q_0$};
+    \end{tikzpicture}
+    \centering
+  \end{figure}
+
+  Caso $e = \lambda$: O AFN \(M\) equivalente é
+  \begin{figure}[H]
+    \begin{tikzpicture}[
+        shorten >=1pt,
+        node distance=3cm,
+        on grid,
+        >={Stealth[round]},
+        every state/.style={draw, minimum size=12mm, font=\small},
+      ]
+      \node[state, initial,accepting, initial text={}] (q0) {$q_0$};
+    \end{tikzpicture}
+    \centering
+  \end{figure}
+
+  Caso \(e = a\): O AFN \(M\) equivalente é
+
+  \begin{figure}[H]
+    \begin{tikzpicture}[
+        shorten >=1pt,
+        node distance=3cm,
+        on grid,
+        >={Stealth[round]},
+        every state/.style={draw, minimum size=12mm, font=\small},
+        accepting/.style={double, double distance=1.5pt},
+      ]
+
+      % Estados
+      \node[state, initial, initial text={}]                (q0) {$q_0$};
+      \node[state, accepting, right=of q0] (q1) {$q_1$};
+
+      % Transição
+      \path[->]
+      (q0) edge node [above] {a} (q1);
+
+    \end{tikzpicture}
+    \centering
+  \end{figure}
+
+  Caso \(e = e_1 + e_2\): O AFN \(M\) equivalente é
+
+  \begin{figure}[H]
+    \begin{tikzpicture}[
+        shorten >=1pt,
+        node distance=2.5cm,
+        on grid,
+        >={Stealth[round]},
+        every state/.style={draw, minimum size=12mm, font=\small},
+        accepting/.style={double, double distance=1.5pt},
+      ]
+
+      \node[state, initial, initial text={}] (q0) {$q_0$};
+
+      \node[state, above right=2cm and 2.5cm of q0] (q1) {$q_1$};
+      \node[state, right=of q1]                      (q2) {$q_2$};
+
+      \node[state, below right=2cm and 2.5cm of q0] (q3) {$q_3$};
+      \node[state, right=of q3]                      (q4) {$q_4$};
+
+      \node[state, accepting, below right=2cm and 2.5cm of q2] (qf) {$q_f$};
+
+      \begin{pgfonlayer}{background}
+        \node[ellipse, draw=blue!70, fill=blue!10, thick,
+          inner sep=8pt, fit=(q1)(q2),
+        label={[blue!70, font=\footnotesize]above:$N(e_1)$}] {};
+        \node[ellipse, draw=red!70, fill=red!10, thick,
+          inner sep=8pt, fit=(q3)(q4),
+        label={[red!70, font=\footnotesize]below:$N(e_2)$}] {};
+      \end{pgfonlayer}
+
+      \path[->]
+      (q0) edge node [above left]  {$\lambda$} (q1)
+      (q0) edge node [below left]  {$\lambda$} (q3)
+      (q1) edge [blue!70, thick] node [above, text=black] {$e_1$} (q2)
+      (q3) edge [red!70, thick]  node [above, text=black] {$e_2$} (q4)
+      (q2) edge node [above right] {$\lambda$} (qf)
+      (q4) edge node [below right] {$\lambda$} (qf);
+
+    \end{tikzpicture}
+    \centering
+  \end{figure}
+
+  em que N($e_1$) é o AFN equivalente a $e_1$ e N($e_2$)
+  é o AFN equivalente a $e_2$.
+
+  Caso \(e = e_1 e_2\): O AFN \(M\) equivalente é
+
+  \begin{figure}[H]
+    \begin{tikzpicture}[
+        shorten >=1pt,
+        node distance=3cm,
+        on grid,
+        >={Stealth[round]},
+        every state/.style={draw, minimum size=12mm, font=\small},
+        accepting/.style={double, double distance=1.5pt},
+      ]
+
+      \node[state, initial, initial text={}]    (q0) {$q_0$};
+      \node[state, right=of q0] (q1) {$q_1$};
+
+      \node[state, right=of q1] (q2) {$q_2$};
+      \node[state, accepting, right=of q2] (q3) {$q_3$};
+
+      \begin{pgfonlayer}{background}
+        \node[ellipse, draw=blue!70, fill=blue!10, thick,
+          inner sep=10pt, fit=(q0)(q1),
+        label={[blue!70, font=\footnotesize]above:$N(e_1)$}] {};
+        \node[ellipse, draw=red!70, fill=red!10, thick,
+          inner sep=10pt, fit=(q2)(q3),
+        label={[red!70, font=\footnotesize]above:$N(e_2)$}] {};
+      \end{pgfonlayer}
+
+      \path[->]
+      (q0) edge [blue!70, thick]  node [above, text=black] {$e_1$} (q1)
+      (q1) edge                   node [above] {$\lambda$}      (q2)
+      (q2) edge [red!70, thick]   node [above, text=black] {$e_2$} (q3);
+    \end{tikzpicture}
+    \centering
+  \end{figure}
+
+  em que N($e_1$) é o AFN equivalente a $e_1$ e N($e_2$) é o
+  AFN equivalente a $e_2$.
+
+  Caso $e = e_1^\star$: O AFN \(M\) equivalente é
+
+  \begin{figure}[H]
+    \begin{tikzpicture}[
+        shorten >=1pt,
+        node distance=3cm,
+        on grid,
+        >={Stealth[round]},
+        every state/.style={draw, minimum size=12mm, font=\small},
+        accepting/.style={double, double distance=1.5pt},
+      ]
+
+      \node[state, initial, initial text={}] (q0) {$q_0$};
+
+      \node[state, right=of q0]  (q1) {$q_1$};
+      \node[state, right=of q1]  (q2) {$q_2$};
+
+      \node[state, accepting, right=of q2] (qf) {$q_f$};
+
+      \begin{pgfonlayer}{background}
+        \node[ellipse, draw=violet!70, fill=violet!10, thick,
+          inner sep=10pt, fit=(q1)(q2),
+        label={[violet!70, font=\footnotesize]above:$N(e_1)$}] {};
+      \end{pgfonlayer}
+
+      \path[->]
+      (q0) edge node [above] {$\lambda$} (q1)
+      (q1) edge [violet!70, thick] node [above, text=black] {$e_1$} (q2)
+      (q2) edge node [above] {$\lambda$} (qf)
+      (q2) edge [bend left=50] node [below] {$\lambda$} (q1)
+      (q0) edge [bend left=50] node [above] {$\lambda$} (qf);
+
+    \end{tikzpicture}
+    \centering
+  \end{figure}
+
+  em que N($e_1$) é o AFN equivalente a $e_1$.
+\end{Definition}
+
+\section{Gerando AFNs a partir de ERs.}
+
+Nesta seção, vamos apresentar uma implementação Haskell da construção
+de Thompson. O primeiro passo é representar expressões regulares
+utilizando um tipo de dados Haskell, conforme a seguir:
+
+\begin{minted}{haskell}
+data Regex
+  = Empty
+  | Lambda
+  | Chr Char
+  | Regex :+: Regex
+  | Regex :@: Regex
+  | Star Regex
+\end{minted}
+
+Para a criação de AFNs a partir da expressão regular, temos que
+definir qual tipo representará os estados do AFN. Por questão de
+simplicidade, vamos utilizar o tipo \haskell{Int}
+para representar estados. Dessa forma, os AFNs produzidos terão tipo
+\haskell{NFA Int}.
+
+Iniciamos apresentando o AFN equivalente a expressão regular
+\haskell{Empty}:
+
+\begin{minted}{haskell}
+emptyNFA :: NFA Int
+emptyNFA
+  = NFA 0 Set.empty (\ _ _ -> Set.empty) Set.empty
+\end{minted}
+
+que consiste de um AFN que não possui estados e nem transições. Dessa
+forma, aceita a linguagem vazia\footnote{Optamos por não representar
+  como um AFN de um único estado não final para reduzir o número de
+estados que seriam considerados inúteis posteriormente.}. O AFN que
+aceita a linguagem formada apenas pela palavra vazia é:
+
+\begin{minted}{haskell}
+lambdaNFA :: NFA Int
+lambdaNFA
+  = NFA 1 one (\ _ _ -> Set.empty) one
+    where
+      one = Set.singleton 1
+\end{minted}
+
+que denota um AFN de um único estado inicial e final, sem transições.
+A função \haskell{chrNFA} constrói um AFN que aceita
+um caractere recebido como argumento.
+
+\begin{minted}{haskell}
+chrNFA :: Char -> NFA Int
+chrNFA c
+  = NFA 2 zero f one
+    where
+      zero = Set.singleton 0
+      one = Set.singleton 1
+      err = Set.empty
+      f 0 x = if c == x then one
+              else err
+      f _ _ = err
+\end{minted}
+
+Este AFN possui dois estados: 0, que é inicial e não final e 1 que é
+final. A função de transição produz como resultado um conjunto vazio,
+exceto quando a origem da transição é o estado 0 e o caractere
+processado é igual a \haskell{c}, que é o argumento
+de \haskell{chrNFA}.
+
+Antes de apresentar funções para produzir AFNs para união,
+concatenação e fecho de Kleene, devemos garantir que AFNs não possuam
+estados com o mesmo \textbf{nome} (i.e.~mesmo valor de tipo
+\haskell{Int}). Para resolver esse problema, vamos
+definir uma função que soma um valor \haskell{n} a
+cada elemento de um conjunto de inteiros.
+
+\begin{minted}{haskell}
+shift :: Int -> Set Int -> Set Int
+shift n = Set.fromAscList . map (+ n) . Set.toAscList
+\end{minted}
+
+A função \haskell{shift} converte um conjunto de
+entrada (tipo \haskell{Set Int}) para uma lista de
+inteiros, usando \haskell{Set.toAscList}, e então
+soma \haskell{n} a cada elemento da lista produzida
+para convertê-la em um conjunto novamente utilizando a função
+\haskell{Set.fromAscList}.
+
+A função que calcula o AFN que aceita a união da linguagem de dois
+AFNs fornecidos como argumentos é definida como:
+
+\begin{minted}{haskell}
+unionNFA :: NFA Int -> NFA Int -> NFA Int
+unionNFA m1 m2
+  = NFA {
+      numberOfStates = n1 + n2
+    , nfaStart = Set.union (nfaStart m1) (shift n1 (nfaStart m2))
+    , nfaDelta = f
+    , nfaFinals = Set.union (nfaFinals m1) (shift n1 (nfaFinals m2))
+    }
+    where
+      n1 = numberOfStates m1
+      n2 = numberOfStates m2
+      f s c = if s < n1 then nfaDelta m1 s c
+              else shift n1 (nfaDelta m2 (s - n1) c)
+\end{minted}
+
+A função \haskell{unionNFA} implementa a união de
+dois AFNs combinando seus conjuntos de estados de forma disjunta.
+Para evitar colisões, ela preserva a estrutura do primeiro autômato
+\haskell{m1} e utiliza uma função de deslocamento
+\haskell{shift} para renomear os estados do segundo
+(\haskell{m2}), garantindo que todos os novos estados
+sejam únicos. O resultado é um novo NFA onde os estados iniciais, as
+transições e os estados de aceitação são a união das partes
+correspondentes de ambos os autômatos originais, permitindo que o AFN
+resultante reconheça a linguagem composta pela união das linguagens
+aceitas por \haskell{m1} e \haskell{m2}.
+
+A seguir, apresentamos a função que calcula o AFN que aceita
+concatenação das linguagem aceitas por dois AFNs fornecidos como argumento.
+
+\begin{minted}{haskell}
+concatNFA :: NFA Int -> NFA Int -> NFA Int
+concatNFA m1 m2
+  = NFA {
+      numberOfStates = n1 + n2
+    , nfaStart = newStart
+    , nfaDelta = newDelta
+    , nfaFinals = newFinals
+    }
+    where
+      n1 = numberOfStates m1
+      n2 = numberOfStates m2
+      start1 = nfaStart m1
+      final1 = nfaFinals m1
+      final2 = nfaFinals m2
+      newStart = if disjoint start1 final1
+                 then start1
+                 else Set.union start1 (shift n1 final1)
+      newFinals = shift n1 final2
+      newDelta e c = if e < n1 then
+                       if disjoint (nfaDelta m1 e c) final1
+                       then nfaDelta m1 e c
+                       else Set.union (nfaDelta m1 e c) (shift n1 start2)
+                     else shift n1 (nfaDelta m2 (e - n1) c)
+\end{minted}
+
+Assim como na construção da união de dois AFNs, utilizamos a função
+\haskell{shift} para garantir que estados de cada um
+dos AFNs de entrada não possuam o mesmo nome. Para isso, utilizamos o
+renomeamento nas definições da função de transição e nos conjuntos de
+estados iniciais e finais. A implementação da função de transição
+\haskell{newDelta} decide o fluxo da computação com
+base no índice do estado atual: se o estado pertence ao primeiro AFN
+(\haskell{e < n1}), a função executa a transição
+original de \haskell{m1}, mas utiliza a verificação
+\haskell{disjoint} para identificar se o destino
+atinge um estado de aceitação; em caso positivo, ela funde esse
+destino aos estados iniciais para permitir o início imediato do
+processamento da segunda linguagem, simulando a conexão entre os
+autômatos sem recorrer a transições vazias. Caso o estado já pertença
+ao segundo AFN (\haskell{e >= n1}), a função
+simplesmente associa a transição original de
+\haskell{m2} para o novo intervalo de índices
+utilizando \haskell{shift}, garantindo que, uma vez
+iniciada a segunda parte da cadeia, o autômato permaneça restrito a
+\haskell{m2}.
+
+A função \haskell{starNFA} implementa o fecho de
+Kleene ao produzir um AFN, a partir de \haskell{m1},
+que aceita zero ou mais repetições da linguagem original, sem
+adicionar novos estados. Para permitir a aceitação da string vazia e
+o reinício do ciclo, a função redefine os estados de aceitação
+(\haskell{nfaFinals}) como sendo os próprios estados
+iniciais (\haskell{nfaStart m1}) e modifica a função
+de transição (\haskell{newDelta}): sempre que uma
+transição original de \haskell{m1} atingiria um
+estado final, ela é inclui os estados iniciais usando
+\haskell{Set.union}. Esse detalhe cria um laço que
+permite ao autômato processar múltiplas palavras consecutivas,
+tratando o alcance de um estado final como um gatilho para reiniciar
+a computação a partir de algum dos estados iniciais.
+
+\begin{minted}{haskell}
+starNFA :: NFA Int -> NFA Int
+starNFA m1
+  = NFA {
+      numberOfStates = numberOfStates m1
+    , nfaStart = nfaStart m1
+    , nfaDelta = newDelta
+    , nfaFinals = nfaStart m1
+    }
+    where
+      newDelta e c
+        = let r = nfaDelta m1 e c
+          in if disjoint r (nfaFinals m1)
+             then r
+             else Set.union r (nfaStart m1)
+\end{minted}
+
+De posse de todas essas funções auxiliares, a conversão de uma
+expressão regular em um AFN equivalente é definida por recursão sobre
+a estrutura da expressão:
+
+\begin{minted}{haskell}
+thompson :: Regex -> NFA Int
+thompson Empty = emptyNFA
+thompson Lambda = lambdaNFA
+thompson (Chr c) = chrNFA c
+thompson (e1 :+: e2)
+  = unionNFA (thompson e1) (thompson e2)
+thompson (e1 :@: e2)
+  = concatNFA (thompson e1) (thompson e2)
+thompson (Star e1)
+  = starNFA (thompson e1)
+\end{minted}
+
+Especificações léxicas de uma linguagem são feitas utilizando
+diversas expressões regulares. A função a seguir, combina as
+implementações descritas até o momento para produzir o AFD
+equivalente a uma lista de expressões regulares:
+
+\begin{minted}{haskell}
+lexer :: [Regex] -> DFA (Set Int)
+lexer = subset . foldr unionNFA emptyNFA . map thompson
+\end{minted}
+
+Primeiro, obtemos um AFN equivalente para cada expressão usando a
+função \haskell{thompson}. Em seguida, realizados a
+união de todos os AFNs produzidos utilizando a função
+\haskell{unionNFA}. Finalmente, obtemos o AFD
+equivalente chamando a função \haskell{subset} sobre
+o resultado dos passos anteriores.
+
+\section{Critério do maior prefixo}
+
+Autômatos fornecem um maneira eficiente e fundamentada para a criação
+de analisadores léxicos. Porém, a mera aceitação de um prefixo da
+entrada é suficiente para que um analisador produza um token? Para
+entender considere o seguinte trecho de código:
+
+\begin{minted}{java}
+if (x > 0) ift = x + 1;
+\end{minted}
+
+Como diferenciar o identificador \haskell{ift} da
+palavra reservada \haskell{if}? A ideia é que
+analisadores léxicos sempre busquem aceitar o \textbf{maior prefixo}
+possível. Esse critério é necessário para evitar ambiguidades
+semânticas e garantir que a análise reflita a intenção real da
+linguagem. Sem esse critério, o analisador léxico poderia fragmentar
+precocemente sequências de caracteres que possuem um significado
+específico quando combinadas, gerando múltiplos tokens genéricos em
+vez de um único token. Com isso, o compilador assegura que
+identificadores, palavras-reservadas e operadores compostos sejam
+interpretados de forma atômica e correta dentro do contexto gramatical.
+
+Mas isso nos leva a seguinte pergunta: Como reconhecer o maior
+prefixo utilizando um AFD? A função a seguir, permite que um AFD de
+argumento reconheça o maior prefixo de uma string de entrada.
+
+\begin{minted}{haskell}
+longest :: DFA a -> String -> Maybe String
+longest m = combine . foldl step (Just "", Nothing, start m)
+  where
+    step (Just pre, Nothing, e) c
+      | finals m (delta m e c)
+          = ( Just (c : pre)
+            , Just (c : pre)
+            , delta m e c)
+      | otherwise
+          = ( Just (c : pre)
+            , Nothing
+            , delta m e c)
+    step (Just pre, Just pre', e) c
+      | finals m (delta m e c)
+          = ( Just (c : pre)
+            , Just (c : pre')
+            , delta m e c)
+      | otherwise = ( Nothing
+                    , Just pre'
+                    , delta m e c)
+    step (Nothing, val, e) c = ( Nothing
+                               , val
+                               , delta m e c)
+
+    combine (_, val, _) = reverse <$> val
+\end{minted}
+
+A função \haskell{longest} busca identificar o maior
+prefixo de uma string aceita por AFD, percorrendo a entrada enquanto
+mantém um acumulador representado como uma tripla formada por:
+
+\begin{itemize}
+  \item
+    Prefixo atual sendo processado
+  \item
+    Último prefixo válido (aceito pelo DFA) encontrado até o momento
+  \item
+    Estado atual do autômato.
+\end{itemize}
+
+A lógica de atualização do acumulador é feita pela função
+\haskell{step} que lida com três situações: ela
+acumula caracteres no prefixo atual enquanto for possível estendê-lo,
+salva essa string como o ``melhor resultado'' sempre que atinge um
+estado final (\haskell{finals}) e, caso o caminho se
+torne inválido para futuras aceitações (indicado pelo valor
+\haskell{Nothing} no primeiro elemento da tupla),
+interrompe a atualização do prefixo em progresso mas preserva a maior
+correspondência já registrada. Ao final, a função
+\haskell{combine} recupera esse maior prefixo
+armazenado e inverte a ordem da string (corrigindo a inversão causada
+pela construção da lista) para retornar a string resultante.
+
+\section{Derivadas de expressões regulares}
+
+A geração de analisadores léxicos baseados na construção de Thompson
+é útil para o reconhecimento de expressões regulares em um
+compilador, visto que a especificação do token não se altera. No
+entanto, expressões regulares são frequentemente usadas em outros
+contextos em que a pré-compilação em um AFD não compensa o custo.
+Infelizmente, bibliotecas comuns de expressões regulares, como as
+utilizadas por Java, Perl e Javascript, apresentam desempenho
+exponencial no pior caso, pois empregam backtracking para lidar com o
+operador de união.
+
+Uma técnica alternativa consiste em interpretar diretamente a
+expressão regular à medida que a entrada é analisada, usando
+derivadas de expressões regulares, uma técnica elegante desenvolvida
+por Janus Brzozowski. A ideia é que, para qualquer expressão regular
+e símbolo de entrada, podemos calcular a expressão regular que aceita
+o restante da entrada após o símbolo de entrada ter sido consumido.
+Usamos a notação \(\partial(e,a)\) para representar a derivada da
+expressão regular \(e\) com respeito ao símbolo de entrada \(a\).
+
+Antes de apresentar a definição de derivadas propriamente ditas,
+precisamos de um conceito auxilar: a noção de anulabilidade. Dizemos
+que uma expressão regular é \textbf{anulável} se \(\lambda \in
+L(e)\). Esse conceito é definido a seguir.
+
+\begin{Definition}
+  Dizemos que uma expressão regular é \textbf{anulável}
+  se \(\nu(e) = \top\), em que \(\nu(e)\) é definido por recursão
+  sobre a estrutura da expressão da seguinte maneira:
+
+  \[
+    \begin{array}{lcl}
+      \nu(\emptyset) & = & \bot\\
+      \nu(\lambda)   & = & \top\\
+      \nu(a)          & = & \bot\\
+      \nu(e_1 e_2)    & = & \nu(e_1) \land \nu(e_2)\\
+      \nu(e_1 + e_2)  & = & \nu(e_1) \lor \nu(e_2)\\
+      \nu(e_1^\star) & = & \top\\
+    \end{array}
+  \]
+\end{Definition}
+
+As três primeiras equações mostram que o conjunto vazio não é
+anulável, que \(\lambda\) é anulável e que um símbolo não é
+considerado anulável. Uma concatenação é anulável somente se ambas as
+suas sub-expressões são anuláveis e a união é considerada anulável se
+qualquer uma de suas sub-expressões o for anulável. Finalmente, uma
+expressão envolvendo o fecho de Kleene é sempre anulável.
+
+Utilizando o conceito de anulabilidade, podemos definir a derivada de
+expressões regulares.
+
+\begin{Definition}[Derivada de uma expressão regular]
+  Seja \(e\) uma expressão regular qualquer e \(a\in
+  \Sigma\). A derivada de \(e\) com respeito a \(a\) é definida como:
+
+  \[
+    \begin{array}{lcl}
+      \partial(\emptyset,a) & = & \emptyset\\
+      \partial(\lambda, a)  & = & \emptyset\\
+      \partial(b, a)         & = & \left\{
+        \begin{array}{ll}
+          \lambda & \textrm{se }a = b \\
+          \emptyset & \textrm{caso contrário}
+        \end{array}
+        \right . \\
+        \partial(e_1 + e_2, a) & = & \partial(e_1,a) + \partial(e_2,a)\\
+        \partial(e_1 e_2, a)   & = & \left\{
+          \begin{array}{ll}
+            \partial(e_1, a) e_2 + \partial(e_2, a) & \textrm{se
+            }\nu(e_1) = \top\\
+            \partial(e_1,a) e_2 & \textrm{caso contrário}
+          \end{array}
+          \right .\\
+          \partial(e_1^\star)   & = & \partial(e_1,a)e_1^\star
+        \end{array}
+      \]
+    \end{Definition}
+
+    A definição da derivada de uma expressão regular em relação a um
+    símbolo \$\$ é apresentada de forma recursiva. Para os casos
+    base: a derivada da expressão vazia \(\emptyset\) ou da palavra
+    vazia \(\lambda\) em relação a qualquer símbolo resulta em
+    \(\emptyset\), pois não é possível consumir um caractere a partir
+    delas. No caso de um símbolo \(b\), a derivada retorna
+    \(\lambda\) se o símbolo consumido \(a\) for igual a \(b\)
+    (indicando que o caractere esperado foi encontrado e a expressão
+    se reduz à palavra vazia), ou \(\emptyset\) caso contrário. Para
+    a união \(e_1 + e_2\), a derivada é simplesmente a união das
+    derivadas de cada subexpressão. No caso da concatenação \(e_1
+    e_2\), a definição se desdobra: se \(e_1\)\hspace{0pt} for
+    anulável (ou seja, pode reconhecer a palavra vazia), a derivada é
+    a união entre a concatenação da derivada de \(e_1\) com \(e_2\) e
+    a derivada de \(e_2\)\hspace{0pt}; caso contrário, é apenas a
+    derivada de \(e_1\)\hspace{0pt} concatenada com \(e_2\). Por fim,
+    para o fecho de Kleene \(e^\star\), a derivada é a concatenação
+    da derivada de \(e\)\hspace{0pt} com a própria estrela
+    \(e^\star\), permitindo que a expressão continue reconhecendo
+    múltiplas repetições.
+
+    Para obter um autômato finito determinístico (AFD) a partir de
+    uma expressão regular utilizando derivadas, podemos construir os
+    estados do autômato como as próprias expressões regulares que
+    surgem durante o processo de derivação. A ideia fundamental é
+    que, partindo da expressão regular original \(e_0\)\hspace{0pt},
+    podemos calcular sua derivada em relação a cada símbolo do
+    alfabeto, obtendo novas expressões que representam o estado após
+    consumir aquele símbolo. Este processo é repetido para cada nova
+    expressão gerada, até que nenhuma nova expressão seja produzida,
+    garantindo que o conjunto de estados seja finito.
+
+    \begin{Definition}
+      Seja \(e\) uma expressão regular qualquer. O AFD
+      equivalente a \(e\) é \(M = (E, \Sigma, \delta, i, F)\), em
+      que:
+      \begin{itemize}
+        \item \(E\): é o conjunto de todas as derivadas para a
+          expressão \(e\).
+        \item \(\Sigma\): alfabeto de entrada
+        \item \(\delta\): função de transição, representada pela própria
+          derivada: \(\delta(e,a) = \partial(e,a)\).
+        \item \(F = \{e_1 \,|\,
+          \nu(e_1) = \top\}\), isto é, consideramos como estados finais
+          as expressões regulares anuláveis.
+      \end{itemize}
+    \end{Definition}
+
+    Um ponto crucial nesta construção é o fato de que o conjunto de
+    derivadas de uma expressão é \textbf{finito}. Porém, esse fato é
+    verdade apenas se considerarmos algumas simplificações,
+    apresentadas a seguir:
+    \[
+      \begin{array}{ccc}
+        e_1 + \emptyset \equiv e_1 &
+        \emptyset + e_2 \equiv e_2 &
+        e_1\emptyset \equiv \emptyset \\
+        \emptyset e_2 \equiv \emptyset &
+        e_1 \lambda\equiv e_1 &
+        \lambda e_2 \equiv e_2 \\
+        \lambda^\star \equiv \lambda &
+        \emptyset^\star \equiv \lambda &
+        (e^\star)^\star \equiv e^\star
+      \end{array}
+    \]
+
+    Considerando essas simplificações, é demonstrado que sempre
+    obteremos um conjunto finito de derivadas a partir de uma
+    expressão regular qualquer.
+
+    \section{Implementação em Haskell}
+
+    De posse das definições, podemos implementar a obtenção de um AFD
+    a partir de uma expressão regular de forma direta. Primeiro,
+    vamos definir uma função para determinar se uma expressão é ou não anulável.
+
+\begin{minted}{haskell}
+nullable :: Regex -> Bool
+nullable Empty = False
+nullable Lambda = True
+nullable (Chr _) = False
+nullable (e1 :+: e2) = nullable e1 || nullable e2
+nullable (e1 :@: e2) = nullable e1 && nullable e2
+nullable (Star _) = True
+\end{minted}
+
+    Observe que a implementação é uma tradução direta da notação
+    matemática para código Haskell. Em seguida, apresentamos funções
+    para realizar as simplificações da união, concatenação e fecho de
+    Kleene. Cada uma destas funções realiza as simplificações
+    apresentadas anteriormente.
+
+\begin{minted}{haskell}
+(.+.) :: Regex -> Regex -> Regex
+Empty .+. e' = e'
+e .+. Empty  = e
+e .+. e'     = e :+: e'
+
+(.@.) :: Regex -> Regex -> Regex
+Empty .@. _ = Empty
+_ .@. Empty = Empty
+Lambda .@. e' = e'
+e .@. Lambda = e
+e .@. e' = e :@: e'
+
+star :: Regex -> Regex
+star Empty = Lambda
+star (Star e) = e
+star e = Star e
+\end{minted}
+
+    De posse destas simplificações e do teste de anulabilidade, a
+    implementação da operação de derivada é apenas a tradução da
+    notação matemática para código Haskell.
+
+\begin{minted}{haskell}
+deriv :: Char -> Regex -> Regex
+deriv _ Empty  = Empty
+deriv _ Lambda = Empty
+deriv a (Chr b)
+  | a == b = Lambda
+  | otherwise = Empty
+deriv a (e1 :+: e2)
+  = deriv a e1 .+. deriv a e2
+deriv a (e1 :@: e2)
+  | nullable e1 = deriv a e1 .@. e2 .+. deriv a e2
+  | otherwise   = deriv a e1 .@. e2
+deriv a (Star e1)
+  = deriv a e1 .@. (star e1)
+\end{minted}
+
+    Para construção do AFD utilizando derivadas, precisamos obter o
+    conjunto de todas as derivadas de uma expressão regular. A função
+    \haskell{enumerateDerivs} implementa um algoritmo
+    para enumerar todas as expressões regulares alcançáveis a partir
+    de uma expressão inicial (\haskell{initial})
+    através da aplicação sucessiva da operação de derivada em relação
+    aos símbolos do alfabeto.
+
+\begin{minted}{haskell}
+enumerateDerivs :: Regex -> [Regex]
+enumerateDerivs initial = go [initial] [initial]
+  where
+    go [] acc = acc
+    go (state:rest) acc =
+        let chars = symbols initial
+            newStates = nub [deriv c state | c <- chars]
+            unseen = filter (`notElem` acc) newStates
+        in go (rest ++ unseen) (acc ++ unseen)
+\end{minted}
+
+    A função \haskell{enumerateDerivs} realiza uma
+    busca sistemática em largura sobre o espaço de estados
+    (expressões regulares), utilizando duas listas: a primeira
+    (state:rest) funciona como uma fila de estados a serem
+    processados, enquanto a segunda (acc) acumula todos os estados já
+    visitados. Para cada estado atual, a função obtém todos os
+    símbolos do alfabeto a partir da expressão inicial (usando
+    \haskell{symbols initial}), calcula a derivada
+    para cada um deles com \haskell{deriv c state}, e
+    remove duplicidades com \haskell{nub}. As novas
+    expressões geradas que ainda não estão no acumulador
+
+    (\haskell{filter (notElem acc) newStates})
+
+    são então adicionadas tanto ao final da fila de processamento quanto
+    ao acumulador, garantindo que todos os estados alcançáveis sejam
+    explorados. O processo continua até que a fila se esgote,
+    retornando a lista completa de expressões regulares que formam os
+    estados do autômato.
+
+    Finalmente, a construção do autômato a partir da expressão
+    regular é feita pela função \haskell{derivDFA}:
+
+\begin{minted}{haskell}
+derivDFA :: Regex -> DFA Regex
+derivDFA e
+  = DFA {
+      start = initial
+    , delta = delta'
+    , finals = nullable
+    }
+  where
+    initial = simp e
+    states = enumerateDerivs initial
+
+    delta' state char =
+        let e' = deriv char state
+        in if e' `elem` states then e' else Empty
+\end{minted}
+
+    O estado inicial é dado pela simplificação da expressão regular
+    de entrada e os estados finais são exatamente as expressões
+    regulares anuláveis. Finalmente, a função de transição é a
+    derivada com respeito ao caractere considerado.
+
+    \section{Conclusão}
+
+    Neste capítulo, apresentamos os fundamentos teóricos e
+    implementações práticas para a construção automatizada de
+    analisadores léxicos. Exploramos autômatos finitos
+    determinísticos e não determinísticos, a construção de Thompson
+    para conversão de expressões regulares em AFNs, e o algoritmo
+    para converter AFNs em AFDs. Discutimos o critério do maior
+    prefixo como solução para ambiguidades na identificação de
+    tokens. Por fim, introduzimos a abordagem de derivadas de
+    expressões regulares, que permite construir AFDs diretamente a
+    partir de expressões regulares de forma elegante e eficiente.

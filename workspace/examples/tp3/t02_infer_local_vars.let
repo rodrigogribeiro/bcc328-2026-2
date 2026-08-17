@@ -1,0 +1,15 @@
+-- Inferência de variáveis locais sem anotação
+let sum_range = fn (lo : int, hi : int) : int {
+    let acc := 0;
+    let i   := lo;
+    while i <= hi {
+        acc := acc + i;
+        i   := i + 1;
+    }
+    return acc;
+}
+
+let main = fn (args : array(string)) : unit {
+    let s := sum_range(1, 10);
+    print(int_to_string(s));
+}

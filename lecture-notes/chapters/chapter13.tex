@@ -1,0 +1,489 @@
+\chapter{Semântica operacional para estado}
+
+\section{Introdução}
+
+No capítulo anterior, estudamos a semântica operacional de uma
+linguagem de expressões aritméticas puras. Naquela linguagem, o valor
+de uma expressão depende apenas da sua estrutura sintática: não há
+variáveis, não há memória, não há efeitos colaterais. A execução é,
+portanto, uma função pura: dada a expressão, o resultado é unicamente
+determinado.
+
+Programas reais, contudo, manipulam \textbf{estado}: valores são
+armazenados em variáveis, lidos da entrada e escritos na saída. Para
+modelar formalmente esse comportamento, a semântica operacional
+precisa ser estendida com um componente que representa o estado da
+memória em cada momento da execução.
+
+Este capítulo estende a linguagem de expressões com
+\textbf{variáveis} e apresenta uma linguagem de \textbf{comandos}
+simples, a linguagem \emph{Line},  que inclui atribuição,
+leitura da entrada padrão e impressão. Definimos a semântica
+small-step e big-step para essa linguagem e mostramos como a
+especificação semântica se traduz diretamente no interpretador
+disponível em
+\begin{flushleft}
+  \verb|Line/Interp/LineInterp.hs|.
+\end{flushleft}
+
+\section{A Linguagem Line}
+
+A linguagem \emph{Line} é uma linguagem imperativa mínima. Um
+programa é uma sequência de comandos (instruções) que são executados
+em ordem. A sua sintaxe abstrata é:
+
+\[
+  \begin{array}{lcl}
+    \mathit{prog} & ::= & s^*\\
+    s & ::= & x \mathbin{:=} e \\
+    & \mid & \mathbf{read}\; x \\
+    & \mid & \mathbf{print}\; e\\
+    e & ::= & n \mid x \mid e_1 + e_2 \mid e_1 * e_2
+  \end{array}
+\]
+
+onde \(n\) é um inteiro, \(x\) é um nome de variável e \(s^*\) denota
+uma sequência (possivelmente vazia) de comandos.
+
+Em Haskell, esses tipos são definidos como:
+
+\begin{minted}{haskell}
+data Line = Line [Stmt]
+
+data Stmt
+  = SAssign Var Exp
+  | SRead   Var
+  | SPrint  Exp
+
+data Exp
+  = EInt Int
+  | EVar Var
+  | Exp :+: Exp
+  | Exp :*: Exp
+
+type Var = String
+\end{minted}
+
+\section{Ambientes}
+
+Para dar significado a um programa que usa variáveis, precisamos de
+uma noção de \textbf{ambiente} (uma representação da memória): uma
+função parcial \(\sigma : \mathit{Var}
+\rightharpoonup \mathbb{Z}\) que mapeia nomes de variáveis para os
+seus valores inteiros atuais.
+
+Escrevemos:
+
+\begin{itemize}
+  \item \(\sigma(x)\) para o valor de \(x\) em \(\sigma\) (supondo \(x
+    \in \mathrm{dom}(\sigma)\))
+  \item \(\sigma[x \mapsto n]\) para o ambiente obtido de \(\sigma\)
+    atualizando (ou inserindo) a variável \(x\) com o valor \(n\)
+  \item \(\emptyset\) para o ambiente vazio (sem variáveis definidas)
+\end{itemize}
+
+Em Haskell, o ambiente é representado como
+\haskell{Map String Int} do módulo
+\haskell{Data.Map}.
+
+\section{Semântica Small-Step}
+
+\subsection{Expressões}
+
+A avaliação de expressões não modifica o ambiente: expressões são
+\textbf{puras} no sentido de que apenas consultam \(\sigma\), sem
+alterá-lo. Uma configuração de expressão é um par \((\sigma, e)\) e a
+relação de redução é \((\sigma, e) \to (\sigma, e')\).
+
+\textbf{Variável:}
+
+\[
+  \infer[_{\{Var\}}]{(\sigma,\, x) \to (\sigma,\, \sigma(x))}{x \in
+  \mathrm{dom}(\sigma)}
+\]
+
+Uma variável é substituída pelo seu valor corrente no ambiente. Se
+\(x\) não estiver definida em \(\sigma\), a avaliação trava: erro
+de variável não inicializada.
+
+\textbf{Redução de subexpressões:}
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{AddL\}}]{(\sigma,\, e_1 + e_2) \to (\sigma,\, e_1' +
+    e_2)}{(\sigma, e_1) \to (\sigma, e_1')}
+    &
+    \infer[_{\{AddR\}}]{(\sigma,\, n_1 + e_2) \to (\sigma,\, n_1 +
+    e_2')}{(\sigma, e_2) \to (\sigma, e_2')}
+  \end{array}
+\]
+
+\[
+  \infer[_{\{Add\}}]{(\sigma,\, n_1 + n_2) \to (\sigma,\, n_1
+  \mathbin{\hat{+}} n_2)}{}
+\]
+
+As regras para multiplicação são análogas: (MulL), (MulR) e (Mul).
+
+\subsection{Comandos}
+
+A configuração de um comando inclui o ambiente, pois os comandos
+podem modificá-lo. Usamos a notação \((\sigma, s) \to (\sigma',
+s')\), onde \(s'\) é o comando residual após a redução. Quando um
+comando termina sua execução, dizemos que ele reduz para
+\(\mathbf{skip}\), um comando que não faz nada.
+
+\textbf{Atribuição: avalia a expressão primeiro:}
+
+\[
+  \infer[_{\{AssignStep\}}]{(\sigma,\, x \mathbin{:=} e)\to
+  (\sigma,\, x \mathbin{:=} e')}{(\sigma, e) \to (\sigma, e')}
+\]
+
+\textbf{Atribuição: expressão já é um valor:}
+
+\[
+  \infer[_{\{Assign\}}]{(\sigma,\, x \mathbin{:=} n) \to (\sigma[x \mapsto n],\,
+  \mathbf{skip})}{}
+\]
+
+\textbf{Impressão: avalia a expressão primeiro:}
+
+\[
+  \infer[_{\{PrintStep\}}]{(\sigma,\, \mathbf{print}\; e)\to
+  (\sigma,\, \mathbf{print}\; e')}{(\sigma, e) \to (\sigma, e')}
+\]
+
+\textbf{Impressão: expressão já é um valor:}
+
+\[
+  \infer[_{\{Print\}}]{(\sigma,\, \mathbf{print}\; n) \to (\sigma,\,
+  \mathbf{skip})}{}
+  \quad [\text{ emite $n$ na saída}]
+\]
+
+\textbf{Sequência:}
+
+\[
+  \infer[_{\{SeqSkip\}}]{(\sigma,\, \mathbf{skip};\, s^\star) \to
+  (\sigma,\, s^\star)}{}
+\]
+
+\[
+  \infer[_{\{Seq\}}]{(\sigma,\, s;\, s^\star) \to (\sigma',\, s';\,
+  s^\star)}{(\sigma, s) \to (\sigma', s')}
+\]
+
+\subsection{Exemplo: Small-Step}
+
+Considere o programa:
+
+\begin{verbatim}
+x := 2 + 3
+print x * 4
+\end{verbatim}
+
+Iniciamos com o ambiente vazio \(\emptyset\). A execução procede assim:
+
+\[
+  (\emptyset,\; x \mathbin{:=} 2 + 3;\; \mathbf{print}\; x * 4)
+\] \[
+  \xrightarrow{\text{Seq, Add}} ([x \mapsto 5],\; \mathbf{skip};\;
+  \mathbf{print}\; x * 4)
+\] \[
+  \xrightarrow{\text{SeqSkip}} ([x \mapsto 5],\; \mathbf{print}\; x * 4)
+\] \[
+  \xrightarrow{\text{PrintStep, Var}} ([x \mapsto 5],\; \mathbf{print}\; 5 * 4)
+\] \[
+  \xrightarrow{\text{PrintStep, Mul}} ([x \mapsto 5],\; \mathbf{print}\; 20)
+\] \[
+  \xrightarrow{\text{Print}} ([x \mapsto 5],\; \mathbf{skip}) \quad
+  \text{[emite 20]}
+\]
+
+Cada passo é justificado por uma regra; a sequência termina quando
+restam apenas \(\mathbf{skip}\)s.
+
+\section{Semântica Big-Step}
+
+Na semântica big-step, abstraímos os passos intermediários e
+definimos diretamente a relação entre configuração inicial e resultado final.
+
+\subsection{Expressões}
+
+A relação \(\sigma \vdash e \Downarrow n\) significa ``no ambiente
+\(\sigma\), a expressão \(e\) avalia para o inteiro \(n\)''.
+
+\textbf{Número:}
+
+\[
+  \infer[_{\{Num\}}]{\sigma \vdash n \Downarrow n}{}
+\]
+
+\textbf{Variável:}
+
+\[
+  \infer[_{\{Var\}}]{\sigma \vdash x \Downarrow \sigma(x)}{x \in
+  \mathrm{dom}(\sigma)}
+\]
+
+\textbf{Adição:}
+
+\[
+  \infer[_{\{Add\}}]{\sigma \vdash e_1 + e_2 \Downarrow n_1
+  \mathbin{\hat{+}} n_2}{\sigma \vdash e_1 \Downarrow n_1 & \sigma
+  \vdash e_2 \Downarrow n_2}
+\]
+
+\textbf{Multiplicação:}
+
+\[
+  \infer[_{\{Mul\}}]{\sigma \vdash e_1 * e_2 \Downarrow n_1
+  \mathbin{\hat{*}} n_2}{\sigma \vdash e_1 \Downarrow n_1 & \sigma
+  \vdash e_2 \Downarrow n_2}
+\]
+
+\subsection{Comandos}
+
+A relação \(\sigma, s \Downarrow \sigma'\) significa ``executar o
+comando \(s\) no ambiente \(\sigma\) produz o ambiente \(\sigma'\)''.
+O ambiente é o único ``resultado'' de um comando; os efeitos de I/O
+(impressão, leitura) são considerados efeitos colaterais implícitos.
+
+\textbf{Atribuição:}
+
+\[
+  \infer[_{\{Assign\}}]{\sigma,\; x \mathbin{:=} e \;\Downarrow\;
+  \sigma[x \mapsto n]}{\sigma \vdash e \Downarrow n}
+\]
+
+\textbf{Impressão:}
+
+\[
+  \infer[_{\{Print\}}]{\sigma,\; \mathbf{print}\; e \;\Downarrow\;
+  \sigma}{\sigma \vdash e \Downarrow n}
+\]
+
+O ambiente não muda com \haskell{print}; apenas o
+valor de \(e\) é emitido como efeito colateral.
+
+\textbf{Leitura:}
+
+\[
+  \infer[_{\{Read\}}]{\sigma,\; \mathbf{read}\; x \;\Downarrow\;
+  \sigma[x \mapsto n]}{}
+  \quad n \text{ lido da entrada}
+\]
+
+A regra (Read) é um axioma cuja premissa implícita é a leitura de um
+inteiro \(n\) da entrada padrão.
+
+\textbf{Sequência vazia:}
+
+\[
+  \infer[_{\{SeqNil\}}]{\sigma,\; \epsilon \;\Downarrow\; \sigma}{}
+\]
+
+\textbf{Sequência não-vazia:}
+
+\[
+  \infer[_{\{SeqCons\}}]{\sigma,\; s;\, s^* \;\Downarrow\;
+  \sigma''}{\sigma,\; s \;\Downarrow\; \sigma' \quad \sigma',\; s^*
+  \;\Downarrow\; \sigma''}
+\]
+
+\subsection{Exemplos: Big-Step}\label{exemplos-big-step}
+
+\textbf{Exemplo 1:} Derivação para \haskell{x := 2 +
+3} partindo de \(\emptyset\).
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{}{\emptyset \vdash 2 \Downarrow 2}
+      \quad
+      \dfrac{}{\emptyset \vdash 3 \Downarrow 3}
+    }{\emptyset \vdash 2 + 3 \Downarrow 5}
+  }{\emptyset,\; x \mathbin{:=} 2 + 3 \;\Downarrow\; [x \mapsto 5]}
+\]
+
+\textbf{Exemplo 2:} Derivação para o programa completo
+(\haskell{x := 2 + 3; print x * 4}) partindo de \(\emptyset\).
+
+\[
+  \dfrac{
+    \underbrace{\emptyset,\; x \mathbin{:=} 2+3 \;\Downarrow\; [x
+    \mapsto 5]}_{\text{Exemplo 1}}
+    \quad
+    \dfrac{
+      \dfrac{
+        \dfrac{}{[x\mapsto 5] \vdash x \Downarrow 5}
+        \quad
+        \dfrac{}{[x\mapsto 5] \vdash 4 \Downarrow 4}
+      }{[x\mapsto 5] \vdash x \star 4 \Downarrow 20}
+    }{[x\mapsto 5],\; \mathbf{print}\; x\star 4 \;\Downarrow\; [x\mapsto 5]}
+  }{\emptyset,\; x \mathbin{:=} 2+3;\; \mathbf{print}\; x\star 4
+  \;\Downarrow\; [x\mapsto 5]}
+\]
+
+A derivação confirma que, ao final, \(x = 5\) e o valor \(20\) foi emitido.
+
+\section{Implementação em Haskell}
+
+\subsection{O Ambiente como Mônada de Estado}
+
+A semântica big-step dita que cada comando recebe um ambiente e
+produz um (possivelmente diferente) ambiente. Em Haskell, isso é
+capturado pela \textbf{mônada de estado} (\haskell{StateT}):
+
+\begin{minted}{haskell}
+type Env = Map String Int
+type Interp a = ExceptT String (StateT Env IO) a
+\end{minted}
+
+A pilha de mônadas combina três capacidades:
+\begin{itemize}
+  \item \haskell{StateT Env}: o ambiente \(\sigma\)
+    implícito, que pode ser lido com \haskell{get} e
+    atualizado com \haskell{modify};
+  \item  \haskell{ExceptT String}: tratamento de erros
+    (como variável não definida) via \haskell{throwError}
+  \item \haskell{IO}: efeitos de I/O para
+    \haskell{read} e \haskell{print}.
+\end{itemize}
+
+O ponto de entrada executa a pilha a partir do ambiente vazio:
+
+\begin{minted}{haskell}
+interp :: Line -> IO ()
+interp p = do
+    (r, _) <- runStateT (runExceptT (interpProgram p)) Map.empty
+    case r of
+      Left err -> putStrLn err
+      Right _  -> pure ()
+\end{minted}
+
+\subsection{Interpretador de Expressões}
+
+A função \haskell{interpExp} implementa as regras
+(Num), (Var), (Add) e (Mul):
+
+\begin{minted}{haskell}
+interpExp :: Exp -> Interp Int
+interpExp (EInt n) = pure n
+interpExp (EVar v) = askVar v
+interpExp (e1 :+: e2) = (+) <$> interpExp e1 <*> interpExp e2
+interpExp (e1 :*: e2) = (*) <$> interpExp e1 <*> interpExp e2
+\end{minted}
+
+A função auxiliar \haskell{askVar} implementa a regra
+(Var): consulta o ambiente corrente e lança um erro se a variável não
+estiver definida (caso não coberto pelas regras semânticas):
+
+\begin{minted}{haskell}
+askVar :: String -> Interp Int
+askVar s = do
+    env <- get
+    case Map.lookup s env of
+      Nothing  -> throwError $ unwords ["Undefined variable:", s]
+      Just val -> pure val
+\end{minted}
+
+\subsection{Interpretador de Comandos}
+
+A função \haskell{interpStmt} implementa as regras
+(Assign), (Print) e (Read):
+
+\begin{minted}{haskell}
+interpStmt :: Stmt -> Interp ()
+interpStmt (SAssign v e) = do
+    val <- interpExp e
+    updateVar v val
+interpStmt (SRead v) = do
+    str <- liftIO getLine
+    let val = read str
+    updateVar v val
+interpStmt (SPrint e) = do
+    val <- interpExp e
+    liftIO $ print val
+\end{minted}
+
+A correspondência com as regras semânticas é direta:
+
+\begin{itemize}
+  \item \haskell{SAssign v e}: avalia
+    \haskell{e} (regra Assign, premissa) e
+    atualiza o ambiente com \haskell{updateVar}
+    (conclusão: \(\sigma[x \mapsto n]\)).
+  \item \haskell{SPrint e}: avalia
+    \haskell{e} e imprime o resultado; o ambiente não
+    muda (regra Print).
+  \item \haskell{SRead v}: lê um inteiro da entrada
+    padrão e armazena em \haskell{v} (regra Read).
+\end{itemize}
+
+A função \haskell{updateVar} encapsula a operação
+\(\sigma[x \mapsto n]\):
+
+\begin{minted}{haskell}
+updateVar :: String -> Int -> Interp ()
+updateVar s val = modify (Map.insert s val)
+\end{minted}
+
+A interpretação de um programa aplica
+\haskell{interpStmt} a cada comando em sequência,
+correspondendo às regras (SeqNil) e (SeqCons):
+
+\begin{minted}{haskell}
+interpProgram :: Line -> Interp ()
+interpProgram (Line ss) = mapM_ interpStmt ss
+\end{minted}
+
+\haskell{mapM_} sequencia os comandos na ordem e
+descarta os resultados unitários, o que equivale exatamente a
+encadear as regras (SeqCons) até atingir (SeqNil).
+
+\subsection{Executando o Interpretador}
+
+\begin{verbatim}
+cabal run line -- --interp --file programa.line
+\end{verbatim}
+
+Por exemplo, dado o arquivo \haskell{programa.line}:
+
+\begin{verbatim}
+x := 10
+y := x * 2
+print y
+\end{verbatim}
+
+O interpretador produziria 20.
+
+\section{Conclusão}
+
+Neste capítulo, estendemos a semântica operacional para lidar com
+\textbf{estado}, introduzindo ambientes que mapeiam variáveis a
+valores. As contribuições principais foram:
+
+\begin{itemize}
+  \item
+    A \textbf{semântica small-step} para comandos usa configurações
+    \((\sigma, s)\) que transportam o ambiente ao longo dos passos de
+    redução. A regra (Assign) modifica o ambiente na transição; as
+    outras regras o propagam sem alteração.
+  \item
+    A \textbf{semântica big-step} relaciona um comando e um ambiente
+    inicial ao ambiente final, abstraindo os passos intermediários. A
+    sua estrutura de ``entrada → saída de ambiente'' traduz-se
+    diretamente na mônada de estado de Haskell.
+  \item
+    A \textbf{implementação} em
+    LineInterp.hs usa a pilha
+    \haskell{ExceptT String (StateT Env IO)}, que
+    integra estado (ambiente), erros e I/O. Cada equação do
+    interpretador corresponde a uma regra semântica.
+\end{itemize}
+
+O padrão estado-como-mônada que vimos aqui reaparecerá nos próximos
+capítulos quando estendermos a linguagem com estruturas de controlo
+como condicionais e laços.

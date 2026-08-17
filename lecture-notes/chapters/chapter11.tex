@@ -1,0 +1,749 @@
+\chapter{Geradores de analisadores sintáticos}
+
+\section{Introdução}
+
+No capítulo anterior estudamos os algoritmos LR(1) e LALR(1) de forma
+teórica e implementamos suas tabelas em Haskell. Na prática, contudo,
+construir essas tabelas à mão para uma gramática real seria
+impraticável. Assim como o Alex automatiza a construção de
+analisadores léxicos a partir de expressões regulares, o
+\textbf{Happy} automatiza a construção de analisadores sintáticos a
+partir de especificações gramaticais no estilo BNF. O Happy gera
+analisadores LALR(1) e é a ferramenta padrão para este fim no
+ecossistema Haskell: o próprio compilador GHC usa um parser gerado
+pelo Happy.
+
+Este capítulo apresenta o Happy através da especificação do parser de
+expressões aritméticas, disponível em
+\begin{flushleft}
+  \verb|Exp/Frontend/Parser/Happy/ExpParser.y|
+\end{flushleft}
+Mostramos como cada parte do arquiv \texttt{.y} se
+relaciona com os conceitos vistos nos capítulos anteriores e como
+usar a opção \verb|-i| para inspecionar a tabela
+LALR gerada. Por fim, ilustramos os dois tipos de conflito que podem
+surgir em gramáticas ambíguas: conflitos shift-reduce e conflitos reduce-reduce.
+
+\section{Estrutura de uma especificação Happy}
+
+Um arquivo de especificação Happy (extensão .y) é dividido em quatro
+partes, separadas
+pelo marcador \%\%:
+
+\begin{verbatim}
+{ cabeçalho Haskell }
+
+diretivas e declaração de tokens
+
+%%
+
+regras gramaticais
+
+{ rodapé Haskell }
+\end{verbatim}
+
+\subsection{Cabeçalho}
+
+A primeira seção, delimitada por chaves, contém código Haskell
+puro que é copiado literalmente para
+o início do arquivo gerado. É aqui que se declara o nome do módulo e
+os imports necessários:
+
+\begin{minted}{haskell}
+{
+module Exp.Frontend.Parser.Happy.ExpParser (expParser, parserTest) where
+
+import Exp.Frontend.Lexer.Token
+import Exp.Frontend.Lexer.Alex.ExpLexer hiding (lexer)
+import Exp.Frontend.Syntax.ExpSyntax
+}
+\end{minted}
+
+\subsection{Diretivas}
+
+As diretivas configuram o parser gerado. As mais comuns são:
+
+\begin{table}[H]
+  \begin{tabular}{p{0.5\linewidth} p{0.5\linewidth}}
+    \toprule
+    Diretiva & Significado \\
+    \midrule
+    \verb|%name p N| & Gera a função \verb|p| que inicia o parsing
+    pelo não-terminal \verb|N| \\
+    \verb|%tokentype { T }| & Define o tipo Haskell dos tokens consumidos \\
+    \verb|%monad { M }{ (>>=) }{ return }| & Executa o parser dentro
+    da mônada \verb|M| \\
+    \verb|%lexer { f }{ eof }| & Integra um lexer incremental;
+    \verb|f| obtém o próximo token e \verb|eof|
+    é o token de fim de entrada \\
+    \verb|%error { h }| & Chama a função \verb|h| quando ocorre um
+    erro de sintaxe \\
+    \verb|%expect n| & Declara que a gramática possui exatamente
+    \verb|n| conflitos shift-reduce esperados; o Happy falha se o
+    número for diferente \\
+    \bottomrule
+  \end{tabular}
+  \centering
+\end{table}
+
+No parser de expressões, essas diretivas ficam assim:
+
+\begin{verbatim}
+%name parser Exp
+%monad {Alex}{(>>=)}{return}
+%tokentype { Token }
+%error     { parseError }
+%lexer {lexer}{Token _ TEOF}
+\end{verbatim}
+
+A diretiva \verb|%monad| integra o Happy com a
+mônada \verb|Alex| do lexer gerado pelo Alex. Com
+\verb|%lexer|, o Happy chama a função
+\haskell{lexer} cada vez que precisa de um token, em
+vez de receber a lista completa de antemão. Esse modo incremental é
+necessário quando o lexer é monádico.
+
+\subsection{Declaração de tokens}
+
+A seção \verb|%token| mapeia nomes simbólicos
+usados nas regras gramaticais para padrões de correspondência (em
+Haskell) contra o tipo de token. Cada linha tem a forma:
+
+\begin{verbatim}
+nome_simbólico  { padrão Haskell }
+\end{verbatim}
+
+No parser de expressões:
+
+\begin{verbatim}
+%token
+      num       {Token _ (TNumber $$)}
+      '('       {Token _ TLParen}
+      ')'       {Token _ TRParen}
+      '+'       {Token _ TPlus}
+      '*'       {Token _ TTimes}
+\end{verbatim}
+
+O uso de \verb|$$| no padrão
+\haskell{Token \_ (TNumber $$)} é especial: ele
+captura o valor inteiro contido no token e o torna disponível nas
+ações semânticas como \verb|$1|,
+\verb|$2|, etc. Para tokens sem valor associado,
+como \verb|TLParen|, o padrão apenas verifica que
+o construtor bate.
+
+\subsection{Declarações de precedência}
+
+As declarações \verb|%left|,
+\verb|%right| e
+\verb|%nonassoc| servem para resolver conflitos
+shift-reduce que surgem em gramáticas de expressões escritas de forma
+ambígua. Cada linha associa uma precedência (determinada pela ordem
+das declarações, de menor para maior) e uma associatividade a um ou mais tokens:
+
+\begin{verbatim}
+%left '+'
+%left '*'
+\end{verbatim}
+
+Neste exemplo, \verb|*| tem precedência mais alta
+que \verb|+| (pois aparece depois), e ambos são
+associativos à esquerda. Veremos na seção sobre conflitos como essas
+declarações eliminam a ambiguidade.
+
+\subsection{Regras gramaticais}
+
+Após o marcador \verb|%%|, definem-se as
+produções da gramática no estilo BNF aumentado com ações semânticas em Haskell:
+
+\begin{verbatim}
+Exp : num         { EInt $1 }
+    | Exp '+' Exp { $1 :+: $3 }
+    | Exp '*' Exp { $1 :*: $3 }
+    | '(' Exp ')' { $2 }
+\end{verbatim}
+
+Cada alternativa é uma produção seguida de uma ação entre chaves. Os
+símbolos \verb|$1|, \verb|$2|,
+\verb|$3| referem-se, respectivamente, ao
+primeiro, segundo e terceiro símbolo do lado direito da produção. A
+ação é executada quando o parser reduz por aquela produção,
+construindo o nó correspondente da AST.
+
+O tipo de retorno de cada não-terminal é inferido pelo compilador
+Haskell a partir das ações: como \haskell{EInt $1} e
+\haskell{$1 :+: $3} têm tipo
+\haskell{Exp}, o não-terminal
+\haskell{Exp} produz valores do tipo
+\haskell{Exp}.
+
+\subsection{Rodapé}
+
+A última seção, também delimitada por chaves, contém funções
+auxiliares usadas nas ações ou nas diretivas:
+
+\begin{minted}{haskell}
+{
+parserTest :: String -> IO ()
+parserTest s = do
+  r <- expParser s
+  print r
+
+parseError (Token (line, col) lexeme)
+  = alexError $ "Parse error while processing lexeme: " ++ show lexeme
+                ++ "\n at line " ++ show line ++ ", column " ++ show col
+
+lexer :: (Token -> Alex a) -> Alex a
+lexer = (=<< alexMonadScan)
+
+expParser :: String -> IO (Either String Exp)
+expParser content = do
+  pure $ runAlex content parser
+}
+\end{minted}
+
+A função \haskell{parseError} recebe o token que
+causou o erro e usa \haskell{alexError} para propagar
+a mensagem de erro dentro da mônada Alex. A função
+\haskell{lexer} adapta
+\haskell{alexMonadScan} (que produz
+\haskell{Alex Token}) para a interface esperada pelo
+Happy (que recebe uma continuação
+\haskell{Token -> Alex a}).
+
+\section{Gerando o parser e inspecionando a tabela}
+
+Para gerar o parser a partir da especificação, basta invocar o Happy:
+
+\begin{minted}{bash}
+happy ExpParser.y
+happy -o ExpParser.hs ExpParser.y
+\end{minted}
+
+Quando a especificação faz parte de um projeto Cabal, o próprio Cabal
+detecta arquivos .y em
+\verb|build-tool-depends| (com
+happy listado) e os processa
+automaticamente antes da compilação Haskell.
+
+\subsection{A opção -i}
+
+A opção \verb|-i| instrui o Happy a gerar um
+\textbf{arquivo de informação} (por padrão
+\verb|ExpParser.info|) que descreve em detalhe a
+tabela LALR construída:
+
+\begin{minted}{bash}
+happy -i ExpParser.y
+\end{minted}
+
+O arquivo gerado contém:
+
+\begin{enumerate}
+  \item
+    \textbf{A gramática aumentada}: as produções numeradas,
+    incluindo a produção inicial $S' \to Exp$.
+  \item
+    \textbf{Conjuntos FIRST} de cada não-terminal.
+  \item
+    \textbf{Os estados do autômato}: cada estado lista seus itens
+    LR(1), com os lookaheads calculados pelo algoritmo LALR.
+  \item
+    \textbf{A tabela de ações}: para cada par (estado, terminal),
+    a ação: shift, reduce ou accept.
+  \item
+    \textbf{A tabela goto}: para cada par (estado, não-terminal),
+    o estado destino.
+  \item
+    \textbf{Conflitos}: se houver, eles são listados com o estado
+    e o token envolvidos, indicando qual ação o Happy escolheu (por
+    padrão, shift vence em conflitos shift-reduce).
+\end{enumerate}
+
+Este arquivo é extremamente útil para depurar gramáticas: ao ver em
+qual estado um conflito ocorre e quais itens ele contém, é possível
+identificar a ambiguidade na gramática e corrigi-la com declarações
+de precedência ou reestruturando as produções.
+
+\section{Conflitos shift-reduce}
+
+Um conflito shift-reduce ocorre quando, em um determinado estado, o
+parser pode tanto deslocar (shift) o próximo token quanto reduzir por
+alguma produção. O caso mais comum é o de gramáticas de expressões
+escritas de forma ambígua.
+
+Considere a gramática de expressões \textbf{sem} declarações de precedência:
+
+\begin{verbatim}
+Exp : num
+    | Exp '+' Exp
+    | Exp '*' Exp
+    | '(' Exp ')'
+\end{verbatim}
+
+Ao analisar a entrada \verb|1 + 2 * 3|, após ter
+empilhado \verb|Exp '+' Exp| (com o segundo
+\verb|Exp| valendo 2), o
+parser vê * na entrada. Ele pode:
+
+\begin{itemize}
+  \item
+    \textbf{Reduzir} \verb|Exp '+' Exp| para
+    \verb|Exp| (interpretando
+    \verb|(1 + 2) * 3|), ou
+  \item
+    \textbf{Deslocar} \verb|*| (interpretando
+    \verb|1 + (2 * 3)|).
+\end{itemize}
+
+Sem orientação adicional, o Happy reporta o conflito e, por padrão,
+escolhe sempre o shift. A mensagem no terminal seria:
+
+\begin{verbatim}
+ExpParser.y: shift/reduce conflicts:  4
+\end{verbatim}
+
+E no arquivo .info, cada conflito é
+detalhado, por exemplo:
+
+\begin{verbatim}
+State 7
+
+        Exp -> Exp . '+' Exp          (rule 2)
+        Exp -> Exp . '*' Exp          (rule 3)
+        Exp -> Exp '+' Exp .          (rule 2)
+
+        '*'    shift, and enter state 5
+               (reduce using rule 2)
+
+        '+'    shift, and enter state 4
+               (reduce using rule 2)
+
+        ')'    reduce using rule 2
+        '$'    reduce using rule 2
+\end{verbatim}
+
+A resolução correta é declarar precedência e associatividade antes do
+\%\%. Ao escrevermos:
+
+\begin{verbatim}
+%left '+'
+%left '*'
+\end{verbatim}
+
+o Happy usa essas informações para resolver cada conflito: quando o
+token a deslocar tem precedência maior que a produção a reduzir, faz
+shift; quando tem menor, reduz; quando são iguais, a associatividade
+decide. Com as declarações acima, \verb|*| tem
+precedência maior que \verb|+|, portanto
+\verb|1 + 2 * 3| é interpretado como
+\verb|1 + (2 * 3)|, e
+\verb|%expect 0| pode ser declarado para
+confirmar que nenhum conflito resta.
+
+Outro exemplo clássico de conflito shift-reduce é o do \textbf{else
+pendente} (\emph{dangling else}), presente em linguagens com
+construção \verb|if-then-else| opcional:
+
+\begin{verbatim}
+Stmt : 'if' Exp 'then' Stmt
+     | 'if' Exp 'then' Stmt 'else' Stmt
+     | 'other'
+\end{verbatim}
+
+Ao analisar if e1 then if e2 then s1 else s2, após empilhar o
+then interior, o parser vê else e tem dúvida: este
+else pertence ao
+if externo ou ao interno? Shift associa o
+else ao if mais
+próximo (interno), que é o comportamento convencional na maioria das
+linguagens. A declaração \verb|%shift!| ou
+simplesmente aceitar o comportamento padrão do Happy resolve o conflito.
+
+\section{Conflitos reduce-reduce}
+
+Um conflito reduce-reduce ocorre quando, em um determinado estado e
+para um mesmo token de lookahead, dois itens completos diferentes
+indicam reduções por produções distintas. Isso geralmente revela uma
+ambiguidade estrutural na gramática que não pode ser resolvida por precedência.
+
+Considere a gramática:
+
+\begin{verbatim}
+Expr : termo
+     | termo
+
+termo : 'x'
+      | 'x'
+\end{verbatim}
+
+De forma mais realista, o conflito aparece quando dois não-terminais
+distintos derivam a mesma sequência de terminais e são
+intercambiáveis no mesmo contexto:
+
+\begin{verbatim}
+Prog : Decl
+     | Expr
+
+Decl : 'id'
+Expr : 'id'
+\end{verbatim}
+
+Ao ver o token \verb|id| e precisar reduzir, o
+parser não sabe se deve criar um nó \verb|Decl| ou
+um nó \verb|Expr|. O arquivo
+.info mostraria algo como:
+
+\begin{verbatim}
+State 1
+
+        Decl -> 'id' .          (rule 1)
+        Expr -> 'id' .          (rule 2)
+
+        '$'    reduce using rule 1
+               (reduce using rule 2)
+\end{verbatim}
+
+O Happy resolve o conflito escolhendo sempre a \textbf{primeira
+regra} na ordem em que aparece no arquivo, mas emite um aviso.
+Diferentemente dos conflitos shift-reduce, conflitos reduce-reduce
+raramente têm uma resolução correta por padrão: eles quase sempre
+indicam que a gramática precisa ser reformulada.
+
+A solução mais comum é tornar os dois não-terminais sintáticos
+distintos por contexto, introduzindo palavras-chave discriminadoras:
+
+\begin{verbatim}
+Prog : 'let' 'id'        -- declaração
+     | 'id'              -- expressão
+\end{verbatim}
+
+Ou, alternativamente, desambiguar na fase semântica (análise de tipos
+ou tabela de símbolos), como fazem as gramáticas de linguagens como
+C, onde typedef torna certos
+identificadores indistinguíveis de tipos sem informação de contexto.
+
+\section{Tratamento de indentação em geradores de parsers}
+
+\subsection{A abordagem do \emph{lexer hack}}
+
+Geradores de parsers como o Happy produzem analisadores LALR(1) que
+operam sobre sequências de \textbf{tokens}. Por definição, esses
+tokens não carregam informação posicional além da necessária para
+o lookahead de um símbolo. Isso significa que a indentação --- que
+depende da coluna em que um token aparece --- não pode ser tratada
+diretamente pela gramática.
+
+A solução clássica, usada por Python, Haskell, YAML e outras
+linguagens, é delegar o trabalho ao \textbf{lexer}: antes de entregar
+tokens ao parser, o analisador léxico injeta tokens sintéticos
+\texttt{INDENT} e \texttt{DEDENT} (ou equivalentes como
+\texttt{BEGIN}/\texttt{END}) que codificam os limites de bloco
+determinados pela indentação. Com isso, o parser LALR vê um fluxo
+de tokens sem indentação e pode tratar blocos como qualquer outro
+par de delimitadores.
+
+Essa técnica é conhecida como \emph{lexer hack} e transforma o
+problema de indentação em um problema léxico, permitindo que a
+gramática continue sendo livre de contexto.
+
+\subsection{A pilha de indentação}
+
+O lexer mantém uma \textbf{pilha de colunas} que representa os
+níveis de indentação abertos. Inicialmente, a pilha contém apenas
+o nível 1 (coluna 1). A cada nova linha, o lexer calcula a coluna
+do primeiro token não-espaço e compara com o topo da pilha:
+
+\begin{enumerate}
+  \item \textbf{Maior que o topo}: emite \texttt{INDENT} e empilha a nova coluna.
+  \item \textbf{Igual ao topo}: emite \texttt{NEWLINE} (separador de declarações
+    no mesmo nível).
+  \item \textbf{Menor que o topo}: emite um \texttt{DEDENT} para
+    cada nível da pilha que seja maior que a coluna atual, desempilhando cada um.
+\end{enumerate}
+
+Ao final do arquivo, são emitidos \texttt{DEDENT}s suficientes para
+fechar todos os blocos abertos.
+
+\subsection{Implementação com o Alex (\texttt{monadUserState})}
+
+O Alex oferece o \emph{wrapper} \texttt{monadUserState}, que integra
+um \textbf{estado de usuário} diretamente na mônada \haskell{Alex}.
+Isso evita a necessidade de uma mônada separada: o estado de
+indentação vive dentro do mesmo contexto monádico que o Alex já
+fornece para o Happy.
+
+\textbf{Estado de usuário.} É preciso definir dois tipos e uma
+função de inicialização com os nomes exatos exigidos pelo Alex:
+
+\begin{minted}{haskell}
+-- Arquivo: IndentLexer.x  (cabeçalho Haskell)
+data AlexUserState = AlexUserState
+  { lsIndents :: [Int]    -- pilha de colunas abertas
+  , lsPending :: [Token]  -- INDENT/DEDENTs a emitir futuramente
+  }
+
+-- O Alex exige exatamente este nome.
+alexInitUserState :: AlexUserState
+alexInitUserState = AlexUserState [1] []
+\end{minted}
+
+O Alex fornece automaticamente as operações:
+
+\begin{minted}{haskell}
+alexGetUserState :: Alex AlexUserState
+alexSetUserState :: AlexUserState -> Alex ()
+\end{minted}
+
+\textbf{Tipo de token e ações léxicas.} Definimos os tokens da
+linguagem e um auxiliar \haskell{tok} para ações simples:
+
+\begin{minted}{haskell}
+data Token
+  = TkIdent  String | TkInt Int
+  | TkAssign | TkColon
+  | TkPlus | TkMinus | TkMul | TkGt | TkLt
+  | TkIf | TkElse | TkWhile
+  | TkNewline | TkIndent | TkDedent | TkEOF
+  deriving (Eq, Show)
+
+-- Ação léxica simples: constrói token a partir do lexema.
+tok :: (String -> Token) -> AlexAction Token
+tok f (_, _, _, str) len = return (f (take len str))
+\end{minted}
+
+\textbf{Especificação Alex.} As regras léxicas usam o wrapper
+\texttt{monadUserState}. O ponto-chave é a regra para
+quebra-de-linha seguida de espaços (início de linha):
+
+\begin{minted}{text}
+%wrapper "monadUserState"
+
+$white_no_nl = $white # \n
+$identc      = [a-zA-Z0-9_]
+
+:-
+
+-- Espaços dentro de uma linha: ignorar
+$white_no_nl+              ;
+
+-- Linha em branco: ignorar completamente
+\n $white_no_nl* \n        ;
+
+-- Início de nova linha: calcular indentação
+\n $white_no_nl*           { handleIndent }
+
+-- Palavras reservadas
+"if"                       { tok (const TkIf) }
+"else"                     { tok (const TkElse) }
+"while"                    { tok (const TkWhile) }
+
+-- Identificadores e literais
+[a-zA-Z_] $identc*         { tok TkIdent }
+[0-9]+                     { tok (TkInt . read) }
+
+-- Operadores e delimitadores
+"=" { tok (const TkAssign) } ":" { tok (const TkColon) }
+"+" { tok (const TkPlus)  } "-" { tok (const TkMinus)  }
+"*" { tok (const TkMul)   } ">" { tok (const TkGt)     }
+"<" { tok (const TkLt)    }
+\end{minted}
+
+\textbf{A ação \haskell{handleIndent}.} Calcula a coluna a partir
+do lexema (que começa com \verb|\n|), compara com a pilha e
+produz o token correto. Quando há múltiplos \texttt{DEDENT}s,
+o primeiro é retornado e os restantes ficam em \haskell{lsPending}:
+
+\begin{minted}{haskell}
+-- Calcula coluna: conta espaços após o '\n' inicial.
+indentCol :: String -> Int
+indentCol ('\n':rest) =
+  1 + length (takeWhile (\c -> c == ' ' || c == '\t') rest)
+indentCol _           = 1
+
+handleIndent :: AlexAction Token
+handleIndent (_, _, _, str) len = do
+  let col   = indentCol (take len str)
+  ust <- alexGetUserState
+  let stack = lsIndents ust
+  case compare col (head stack) of
+    GT -> do                              -- novo bloco
+      alexSetUserState ust { lsIndents = col : stack }
+      return TkIndent
+    EQ -> return TkNewline               -- mesmo nível
+    LT -> do                              -- fecha bloco(s)
+      let (toClose, rest) = span (> col) stack
+      alexSetUserState ust
+        { lsIndents = rest
+        , lsPending = replicate (length toClose - 1) TkDedent
+        }
+      return TkDedent
+\end{minted}
+
+\textbf{Tratamento de fim de arquivo.} O Alex chama \haskell{alexEOF}
+quando a entrada termina. Aproveitamos para fechar blocos abertos:
+
+\begin{minted}{haskell}
+alexEOF :: Alex Token
+alexEOF = do
+  ust <- alexGetUserState
+  case lsIndents ust of
+    [_] -> return TkEOF           -- só o nível base: fim normal
+    (_:rest) -> do
+      alexSetUserState ust
+        { lsIndents = rest
+        , lsPending = replicate (length rest - 1) TkDedent ++ [TkEOF]
+        }
+      return TkDedent             -- fecha o nível mais profundo
+    [] -> return TkEOF
+\end{minted}
+
+\textbf{A função \haskell{lexer} para o Happy.} Como o Happy com
+\verb|%lexer| solicita um token de cada vez via continuação, e
+uma ação Alex só pode retornar um token, usamos \haskell{lsPending}
+como fila. A função \haskell{lexer} drena a fila antes de chamar
+\haskell{alexMonadScan}:
+
+\begin{minted}{haskell}
+-- Função passada ao Happy via %lexer { lexer } { TkEOF }
+lexer :: (Token -> Alex a) -> Alex a
+lexer cont = do
+  ust <- alexGetUserState
+  case lsPending ust of
+    (t:ts) -> do                  -- ainda há tokens pendentes
+      alexSetUserState ust { lsPending = ts }
+      cont t
+    [] -> do                      -- busca o próximo token do Alex
+      t <- alexMonadScan
+      cont t
+\end{minted}
+
+\textbf{Diretivas Happy.} Com o lexer monádico acima, a
+especificação Happy usa as diretivas já conhecidas:
+
+\begin{verbatim}
+%name     parser   Program
+%tokentype { Token }
+%monad    { Alex }{ (>>=) }{ return }
+%lexer    { lexer }{ TkEOF }
+%error    { parseError }
+\end{verbatim}
+
+\subsection{A gramática Happy com \texttt{INDENT}/\texttt{DEDENT}}
+
+Uma vez que o lexer injeta os tokens de bloco, a gramática Happy
+pode tratar blocos indentados exatamente como blocos delimitados:
+
+\begin{verbatim}
+%token
+  ident     { TkIdent $$ }
+  int       { TkInt   $$ }
+  '='       { TkAssign   }
+  'if'      { TkIf       }
+  'else'    { TkElse     }
+  'while'   { TkWhile    }
+  ':'       { TkColon    }
+  INDENT    { TkIndent   }
+  DEDENT    { TkDedent   }
+  NEWLINE   { TkNewline  }
+  EOF       { TkEOF      }
+
+%%
+
+Program : Stmts EOF                { $1 }
+
+Stmts : {- vazio -}                { [] }
+      | Stmts Stmt                 { $1 ++ [$2] }
+
+Block : INDENT Stmts DEDENT        { $2 }
+
+Stmt : ident '=' Expr NEWLINE      { Assign $1 $3 }
+     | 'if' Expr ':' NEWLINE Block            { If $2 $5 Nothing }
+     | 'if' Expr ':' NEWLINE Block 'else' ':' NEWLINE Block
+                                             { If $2 $5 (Just $9) }
+     | 'while' Expr ':' NEWLINE Block        { While $2 $5 }
+
+Expr : Expr '+' Term     { BinOp Add $1 $3 }
+     | Expr '-' Term     { BinOp Sub $1 $3 }
+     | Term              { $1 }
+
+Term : Term '*' Atom     { BinOp Mul $1 $3 }
+     | Atom              { $1 }
+
+Atom : int               { Lit $1 }
+     | ident             { Var $1 }
+     | '(' Expr ')'      { $2 }
+\end{verbatim}
+
+A produção \texttt{Block : INDENT Stmts DEDENT} é diretamente
+análoga a \texttt{Block : '\{' Stmts '\}'} em linguagens que usam
+chaves. O parser LALR não sabe que \texttt{INDENT} e \texttt{DEDENT}
+vêm da indentação; para ele, são tokens como quaisquer outros.
+
+\subsection{Exemplo de tokenização}
+
+Para a entrada
+
+\begin{minted}{python}
+x = 5
+if x > 0:
+    y = x + 1
+    while y > 0:
+        y = y - 1
+\end{minted}
+
+\noindent o lexer produz o seguinte fluxo de tokens (simplificado):
+
+\begin{verbatim}
+TkIdent "x"  TkAssign  TkInt 5  TkNewline
+TkIf  TkIdent "x"  TkGt  TkInt 0  TkColon  TkNewline
+TkIndent
+  TkIdent "y"  TkAssign  TkIdent "x"  TkPlus  TkInt 1  TkNewline
+  TkWhile  TkIdent "y"  TkGt  TkInt 0  TkColon  TkNewline
+  TkIndent
+    TkIdent "y"  TkAssign  TkIdent "y"  TkMinus  TkInt 1  TkNewline
+  TkDedent
+TkDedent
+TkEOF
+\end{verbatim}
+
+Observe que os \texttt{TkDedent}s são emitidos em cascata: ao
+retornar ao nível 0, dois níveis são fechados, resultando em dois
+\texttt{TkDedent}s. O parser vê um fluxo linear e usa \texttt{INDENT}/
+\texttt{DEDENT} exatamente como usaria \texttt{\{}/\texttt{\}} em C.
+
+\subsection{Comparação das abordagens}
+
+\begin{table}[H]
+  \centering
+  \begin{tabular}{p{0.22\linewidth}p{0.36\linewidth}p{0.36\linewidth}}
+    \toprule
+    & \textbf{Megaparsec} \texttt{indentBlock} & \textbf{Lexer hack} (Happy) \\
+    \midrule
+    \textbf{Onde age} & No parser, durante o parsing & No lexer, antes do parser \\
+    \textbf{Mecanismo} & Verifica coluna corrente via \haskell{indentLevel} & Pilha de colunas; emite \texttt{INDENT}/\texttt{DEDENT} \\
+    \textbf{Gramática} & Sem alteração; indentação é um combinador & Gramática usa \texttt{INDENT}/\texttt{DEDENT} como tokens \\
+    \textbf{Erros} & Megaparsec reporta erro de indentação com linha/col & Erro reportado pelo parser (token inesperado) \\
+    \textbf{Complexidade} & Moderada; dois consumidores de espaço & Lexer com estado de pilha \\
+    \textbf{Usado em} & Parsers Megaparsec, dhall-haskell & Python, GHC (regra de layout Haskell) \\
+    \bottomrule
+  \end{tabular}
+  \caption{Comparação entre as abordagens de tratamento de indentação.}
+\end{table}
+
+\section{Conclusão}
+
+Este capítulo apresentou o Happy, o gerador de analisadores
+sintáticos padrão em Haskell. Vimos como um arquivo
+.y é estruturado em quatro partes
+(cabeçalho, diretivas, regras e rodapé) e como cada diretiva
+configura o parser gerado. Estudamos a especificação concreta do
+parser de expressões aritméticas, que integra o Happy com o lexer
+monádico gerado pelo Alex. Mostramos como a opção
+-i permite inspecionar os estados LALR e os
+conflitos detectados, tornando o processo de depuração de gramáticas
+transparente. Por fim, ilustramos os dois tipos de conflito
+(shift-reduce, geralmente resolúvel com declarações de precedência, e
+reduce-reduce, que normalmente exige a reformulação da gramática),
+conectando os conceitos teóricos dos capítulos anteriores à prática
+do desenvolvimento de compiladores em Haskell.

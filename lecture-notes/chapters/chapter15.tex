@@ -1,0 +1,1049 @@
+\chapter{Introdução aos sistemas de tipos}
+
+\section{Introdução}
+
+Nos capítulos anteriores, definimos semânticas operacionais para
+linguagens de expressões e para linguagens imperativas. Vimos que a
+semântica de uma linguagem pode ser dada por regras de inferência que
+descrevem como os programas são executados. No entanto, a semântica
+por si só não impede que expressões sem sentido sejam escritas: como
+somar um booleano a um inteiro, ou executar
+\haskell{pred true}. Essas expressões são
+\textbf{sintaticamente válidas}, mas \textbf{semanticamente sem significado}.
+
+É exatamente para isso que servem os \textbf{sistemas de tipos}:
+impor, de forma estática, que apenas expressões semanticamente
+bem-definidas possam ser executadas. Este capítulo apresenta as
+diferentes estratégias de tipagem utilizadas por linguagens de
+programação e discute os sistemas de tipos, utilizados para descrever
+formalmente regras para validação de tipos em linguagens de programação.
+
+\section{Tipos em Linguagens de Programação}
+
+Um \textbf{tipo} é uma classificação de valores que define:
+
+\begin{enumerate}
+  \item Quais operações são aplicáveis a eles;
+  \item Como eles são representados na memória;
+  \item Que conjunto de valores o tipo compreende.
+\end{enumerate}
+
+Por exemplo, o tipo \haskell{Int} classifica valores
+inteiros e admite operações aritméticas; o tipo
+\haskell{Bool} classifica os valores
+\haskell{true} e \haskell{false} e
+admite operações lógicas. O \textbf{sistema de tipos} de uma
+linguagem é o conjunto de regras que associa tipos a expressões e
+verifica se essas associações são coerentes.
+
+\subsection{Tipagem Estática e Dinâmica}
+
+A distinção mais fundamental em sistemas de tipos é \emph{quando} a
+verificação de tipos ocorre:
+
+\textbf{Tipagem estática} (\emph{static typing}): a verificação é
+feita em \textbf{tempo de compilação}, antes da execução do programa.
+Se o programa contiver um erro de tipo, o compilador o rejeita. As
+linguagens Haskell, Java, C e Rust são exemplos que usam tipagem estática.
+
+\textbf{Tipagem dinâmica} (\emph{dynamic typing}): a verificação é
+feita em \textbf{tempo de execução}, à medida que o programa é
+executado. Erros de tipo são detectados apenas quando a operação
+inválida é executada. Exemplos de linguagens que usam essa estratégia
+são Python, JavaScript, Ruby e Lisp.
+
+A tipagem estática oferece garantias mais fortes: o sistema de tipos
+pode certificar que certos tipos de erros \emph{nunca} ocorrerão em
+nenhuma execução do programa. A tipagem dinâmica oferece mais
+flexibilidade, mas adia a detecção de erros para o momento da execução.
+
+\subsection{Tipagem Forte e Fraca}
+
+Uma distinção ortogonal é a de \textbf{tipagem forte} vs \textbf{tipagem fraca}:
+
+\textbf{Tipagem forte} (\emph{strong typing}): a linguagem não
+permite conversões implícitas entre tipos incompatíveis. Operações
+entre tipos diferentes resultam em erro (em tempo de compilação ou
+execução). Exemplos: Haskell, Python.
+
+\textbf{Tipagem fraca} (\emph{weak typing}): a linguagem realiza
+conversões implícitas entre tipos, frequentemente de maneiras
+surpreendentes. Exemplos: C (converte implicitamente entre inteiros e
+ponteiros), JavaScript (\haskell{1 + "1"} resulta em
+\haskell{"11"}).
+
+Note que estas classificações são independentes: Python é
+dinamicamente tipado e fortemente tipado; C é estaticamente tipado e
+fracamente tipado.
+
+\section{A Linguagem de Expressões Tipadas}
+
+Para discutirmos sobre sistemas de tipos, vamos utilizar um linguagem
+de expressões simples. A sua \textbf{sintaxe abstrata} é representada
+pela seguinte gramática:
+
+\[
+  \begin{array}{lcll}
+    t & ::= & \mathbf{true}  & \text{(verdadeiro)} \\
+    & \mid & \mathbf{false} & \text{(falso)} \\
+    & \mid & \mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3
+    & \text{(condicional)} \\
+    & \mid & \mathbf{0} & \text{(zero)} \\
+    & \mid & \mathbf{succ}\ t & \text{(sucessor)} \\
+    & \mid & \mathbf{pred}\ t & \text{(predecessor)} \\
+    & \mid & \mathbf{iszero}\ t & \text{(teste de zero)}
+  \end{array}
+\]
+
+Os \textbf{tipos} são:
+
+\[
+  \begin{array}{lcll}
+    T & ::= & \mathbf{Bool} & \text{(booleano)} \\
+    & \mid & \mathbf{Nat}  & \text{(número natural)}
+  \end{array}
+\]
+
+Os \textbf{valores} da linguagem são os termos que já não podem ser
+reduzidos pela semântica operacional. Distinguimos dois tipos de valores:
+
+\[
+  \begin{array}{lcll}
+    v & ::= & \mathbf{true} \mid \mathbf{false} \mid nv \\
+    nv & ::= & \mathbf{0} \mid \mathbf{succ}\ nv
+  \end{array}
+\]
+
+onde \(nv\) denota os \textbf{valores numéricos}, isto é, \(\mathbf{0}\) e
+qualquer número de aplicações de \(\mathbf{succ}\) a \(\mathbf{0}\).
+
+\section{O Sistema de Tipos}
+
+Um \textbf{sistema de tipos} é definido por uma \textbf{relação de
+tipagem} entre termos e tipos. Escrevemos \(\vdash t : T\) para dizer
+que ``o termo \(t\) tem tipo \(T\)''. A relação é definida por um
+conjunto de regras de inferência.
+
+\subsection{Regras de Tipagem}
+
+\textbf{Constantes booleanas:}
+
+\[
+  \frac{}{\vdash \mathbf{true} : \mathbf{Bool}} \quad\text{(T-True)}
+  \qquad
+  \frac{}{\vdash \mathbf{false} : \mathbf{Bool}} \quad\text{(T-False)}
+\]
+
+\textbf{Condicional:}
+
+\[
+  \frac{
+    \vdash t_1 : \mathbf{Bool} \quad
+    \vdash t_2 : T \quad
+    \vdash t_3 : T
+  }{
+    \vdash \mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3 : T
+  } \quad\text{(T-If)}
+\]
+
+A regra (T-If) exige que a condição \(t_1\) seja booleana e que os
+dois ramos \(t_2\) e \(t_3\) tenham o \textbf{mesmo tipo} \(T\). O
+resultado do condicional tem esse tipo.
+
+\textbf{Naturais:}
+
+\[
+  \frac{}{\vdash \mathbf{0} : \mathbf{Nat}} \quad\text{(T-Zero)}
+\]
+
+\[
+  \frac{\vdash t_1 : \mathbf{Nat}}{\vdash \mathbf{succ}\ t_1 :
+  \mathbf{Nat}} \quad\text{(T-Succ)}
+  \qquad
+  \frac{\vdash t_1 : \mathbf{Nat}}{\vdash \mathbf{pred}\ t_1 :
+  \mathbf{Nat}} \quad\text{(T-Pred)}
+\]
+
+\[
+  \frac{\vdash t_1 : \mathbf{Nat}}{\vdash \mathbf{iszero}\ t_1 :
+  \mathbf{Bool}} \quad\text{(T-IsZero)}
+\]
+
+\subsection{Exemplos de Derivações de Tipo}
+
+\textbf{Exemplo 1:} O termo
+\(\mathbf{iszero}\ (\mathbf{succ}\ \mathbf{0})\) tem tipo \(\mathbf{Bool}\):
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{}{\vdash \mathbf{0} : \mathbf{Nat}}
+    }{\vdash \mathbf{succ}\ \mathbf{0} : \mathbf{Nat}}
+  }{\vdash \mathbf{iszero}\ (\mathbf{succ}\ \mathbf{0}) : \mathbf{Bool}}
+\]
+
+\textbf{Exemplo 2:} O condicional
+\(\mathbf{if}\ (\mathbf{iszero}\ \mathbf{0})\ \mathbf{then}\ \mathbf{0}\ \mathbf{else}\ \mathbf{succ}\ \mathbf{0}\)
+tem tipo \(\mathbf{Nat}\):
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{}{\vdash \mathbf{0} : \mathbf{Nat}}
+    }{\vdash \mathbf{iszero}\ \mathbf{0} : \mathbf{Bool}}
+    \quad
+    \dfrac{}{\vdash \mathbf{0} : \mathbf{Nat}}
+    \quad
+    \dfrac{
+      \dfrac{}{\vdash \mathbf{0} : \mathbf{Nat}}
+    }{\vdash \mathbf{succ}\ \mathbf{0} : \mathbf{Nat}}
+  }{\vdash
+    \mathbf{if}\ (\mathbf{iszero}\ \mathbf{0})\ \mathbf{then}\ \mathbf{0}\ \mathbf{else}\ \mathbf{succ}\ \mathbf{0}
+  : \mathbf{Nat}}
+\]
+
+\textbf{Exemplo 3 (erro de tipo):} O termo
+\(\mathbf{succ}\ \mathbf{true}\) \textbf{não é tipável}: a regra
+(T-Succ) exige que o argumento tenha tipo \(\mathbf{Nat}\), mas
+\(\mathbf{true}\) tem tipo \(\mathbf{Bool}\). Não existe derivação
+válida para este termo.
+
+\subsection{Unicidade de Tipos}
+
+Uma propriedade importante desta linguagem é a \textbf{unicidade de
+tipos}: cada termo bem tipado tem \textbf{exatamente um tipo}. Formalmente:
+
+\begin{quote}
+  \textbf{Lema (Unicidade):} Se \(\vdash t : T\) e \(\vdash t : T'\),
+  então \(T = T'\).
+\end{quote}
+
+\textbf{Prova:} Por indução estrutural no termo \(t\).
+
+\begin{itemize}
+  \item
+    \emph{Caso} \(t = \mathbf{true}\): a única regra aplicável é
+    (T-True), que conclui \(T = \mathbf{Bool}\). Logo \(T = T' =
+    \mathbf{Bool}\).
+  \item
+    \emph{Caso} \(t = \mathbf{false}\): análogo.
+  \item
+    \emph{Caso} \(t = \mathbf{0}\): a única regra aplicável é
+    (T-Zero), que conclui \(T = \mathbf{Nat}\). Logo \(T = T' = \mathbf{Nat}\).
+  \item
+    \emph{Caso} \(t = \mathbf{succ}\ t_1\): a única regra aplicável é
+    (T-Succ). Ambas as derivações de \(T\) e de \(T'\) devem usar
+    (T-Succ), portanto \(T = T' = \mathbf{Nat}\).
+  \item
+    \emph{Caso} \(t = \mathbf{pred}\ t_1\): análogo; a única regra
+    é (T-Pred), logo \(T = T' = \mathbf{Nat}\).
+  \item
+    \emph{Caso} \(t = \mathbf{iszero}\ t_1\): a única regra é
+    (T-IsZero), logo \(T = T' = \mathbf{Bool}\).
+  \item
+    \emph{Caso} \(t =
+    \mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\): a
+    única regra aplicável é (T-If). Pela hipótese de indução aplicada
+    a \(t_2\), o tipo de \(t_2\) é único; como ambas as derivações
+    concluem \(T\) e \(T'\) com base no tipo de \(t_2\), temos \(T = T'\).
+\end{itemize}
+
+Como a prova cobre todos os casos da gramática, o lema está
+demonstrado. A consequência prática é que a tipagem é
+\textbf{determinística}: inspecionando um termo, é possível
+determinar seu tipo de forma única, sem ambiguidade.
+
+\section{Semântica Small-Step}
+
+A semântica small-step define a execução como uma sequência de
+reduções \(t \to t'\). Os termos que não podem ser reduzidos são os
+\textbf{valores} \(v\) e as \textbf{formas presas} (\emph{stuck
+terms}), termos sem mais reduções disponíveis que não são valores,
+como \(\mathbf{succ}\ \mathbf{true}\).
+
+\subsection{Regras de Redução para Booleanos}
+
+\textbf{Condicional (redução da condição):}
+
+\[
+  \frac{t_1 \to
+  t_1'}{\mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3 \to
+  \mathbf{if}\ t_1'\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3}
+  \quad\text{(E-If)}
+\]
+
+\textbf{Condicional (ramos):}
+
+\[
+  \frac{}{\mathbf{if}\ \mathbf{true}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3
+  \to t_2}
+  \quad\text{(E-IfTrue)}
+  \qquad
+  \frac{}{\mathbf{if}\ \mathbf{false}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3
+  \to t_3}
+  \quad\text{(E-IfFalse)}
+\]
+
+\subsection{Regras de Redução para Naturais}
+
+\textbf{Sucessor:}
+
+\[
+  \frac{t_1 \to t_1'}{\mathbf{succ}\ t_1 \to \mathbf{succ}\ t_1'}
+  \quad\text{(E-Succ)}
+\]
+
+\textbf{Predecessor:}
+
+\[
+  \frac{t_1 \to t_1'}{\mathbf{pred}\ t_1 \to \mathbf{pred}\ t_1'}
+  \quad\text{(E-Pred)}
+  \qquad
+  \frac{}{\mathbf{pred}\ \mathbf{0} \to \mathbf{0}}
+  \quad\text{(E-PredZero)}
+  \qquad
+  \frac{}{\mathbf{pred}\ (\mathbf{succ}\ nv_1) \to nv_1}
+  \quad\text{(E-PredSucc)}
+\]
+
+\textbf{Teste de zero:}
+
+\[
+  \frac{t_1 \to t_1'}{\mathbf{iszero}\ t_1 \to \mathbf{iszero}\ t_1'}
+  \quad\text{(E-IsZero)}
+  \qquad
+  \frac{}{\mathbf{iszero}\ \mathbf{0} \to \mathbf{true}}
+  \quad\text{(E-IsZeroZero)}
+  \qquad
+  \frac{}{\mathbf{iszero}\ (\mathbf{succ}\ nv_1) \to \mathbf{false}}
+  \quad\text{(E-IsZeroSucc)}
+\]
+
+\subsection{Formas Presas}
+
+Uma \textbf{forma presa} (\emph{stuck term}) é um termo que não é um
+valor e para o qual nenhuma regra de redução se aplica. Por exemplo:
+
+\begin{itemize}
+  \item \(\mathbf{succ}\ \mathbf{true}\): não é um valor (pois
+    \(\mathbf{true}\) não é um \(nv\)) e nenhuma regra se aplica;
+  \item \(\mathbf{pred}\ \mathbf{false}\): idem;
+  \item \(\mathbf{if}\ \mathbf{0}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\):
+    \(\mathbf{0}\) é um valor numérico, não booleano.
+\end{itemize}
+
+Formas presas representam \textbf{erros em tempo de execução}. O
+papel do sistema de tipos é garantir que termos bem tipados nunca se
+tornem formas presas.
+
+\subsection{Exemplo: Small-Step}
+
+Considere o termo \(t =
+\mathbf{pred}\ (\mathbf{succ}\ (\mathbf{succ}\ \mathbf{0}))\):
+
+\[
+  \mathbf{pred}\ (\mathbf{succ}\ (\mathbf{succ}\ \mathbf{0}))
+  \xrightarrow{\text{E-PredSucc}}
+  \mathbf{succ}\ \mathbf{0}
+\]
+
+O resultado \(\mathbf{succ}\ \mathbf{0}\) é um valor numérico (\(nv\)).
+
+Considere agora:
+
+\[
+  \mathbf{if}\ (\mathbf{iszero}\ \mathbf{0})\ \mathbf{then}\ (\mathbf{succ}\ \mathbf{0})\ \mathbf{else}\ \mathbf{0}
+\]
+
+\[
+  \xrightarrow{\text{E-If, E-IsZeroZero}}
+  \mathbf{if}\ \mathbf{true}\ \mathbf{then}\ (\mathbf{succ}\ \mathbf{0})\ \mathbf{else}\ \mathbf{0}
+\]
+
+\[
+  \xrightarrow{\text{E-IfTrue}}
+  \mathbf{succ}\ \mathbf{0}
+\]
+
+\section{Semântica Big-Step}
+
+A semântica big-step define a relação \(t \Downarrow v\), lida como
+``o termo \(t\) avalia para o valor \(v\)''.
+
+\subsection{Regras para Booleanos}
+
+\[
+  \frac{}{\mathbf{true} \Downarrow \mathbf{true}} \quad\text{(B-True)}
+  \qquad
+  \frac{}{\mathbf{false} \Downarrow \mathbf{false}} \quad\text{(B-False)}
+\]
+
+\[
+  \frac{t_1 \Downarrow \mathbf{true} \quad t_2 \Downarrow v}
+  {\mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3 \Downarrow v}
+  \quad\text{(B-IfTrue)}
+  \qquad
+  \frac{t_1 \Downarrow \mathbf{false} \quad t_3 \Downarrow v}
+  {\mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3 \Downarrow v}
+  \quad\text{(B-IfFalse)}
+\]
+
+\subsection{Regras para Naturais}
+
+\[
+  \frac{}{\mathbf{0} \Downarrow \mathbf{0}} \quad\text{(B-Zero)}
+  \qquad
+  \frac{t_1 \Downarrow nv_1}{\mathbf{succ}\ t_1 \Downarrow
+  \mathbf{succ}\ nv_1} \quad\text{(B-Succ)}
+\]
+
+\[
+  \frac{t_1 \Downarrow \mathbf{0}}{\mathbf{pred}\ t_1 \Downarrow
+  \mathbf{0}} \quad\text{(B-PredZero)}
+  \qquad
+  \frac{t_1 \Downarrow \mathbf{succ}\ nv_1}{\mathbf{pred}\ t_1
+  \Downarrow nv_1} \quad\text{(B-PredSucc)}
+\]
+
+\[
+  \frac{t_1 \Downarrow \mathbf{0}}{\mathbf{iszero}\ t_1 \Downarrow
+  \mathbf{true}} \quad\text{(B-IsZeroZero)}
+  \qquad
+  \frac{t_1 \Downarrow \mathbf{succ}\ nv_1}{\mathbf{iszero}\ t_1
+  \Downarrow \mathbf{false}} \quad\text{(B-IsZeroSucc)}
+\]
+
+\subsection{Exemplo: Big-Step}
+
+\textbf{Exemplo:}
+\(\mathbf{if}\ (\mathbf{iszero}\ \mathbf{0})\ \mathbf{then}\ \mathbf{succ}\ \mathbf{0}\ \mathbf{else}\ \mathbf{0}
+\Downarrow \mathbf{succ}\ \mathbf{0}\)
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{}{\mathbf{0} \Downarrow \mathbf{0}}
+    }{\mathbf{iszero}\ \mathbf{0} \Downarrow \mathbf{true}}
+    \quad
+    \dfrac{
+      \dfrac{}{\mathbf{0} \Downarrow \mathbf{0}}
+    }{\mathbf{succ}\ \mathbf{0} \Downarrow \mathbf{succ}\ \mathbf{0}}
+  }{
+    \mathbf{if}\ (\mathbf{iszero}\ \mathbf{0})\ \mathbf{then}\ \mathbf{succ}\ \mathbf{0}\ \mathbf{else}\ \mathbf{0}
+    \Downarrow \mathbf{succ}\ \mathbf{0}
+  }
+\]
+
+\section{Corretude do Sistema de Tipos}
+
+A propriedade de \textbf{corretude} (\emph{type soundness})
+estabelece que o sistema de tipos é uma garantia válida: termos bem
+tipados nunca se tornam formas presas. Em outras palavras, um
+programa que passa na verificação de tipos \textbf{sempre progride}
+até um valor, sem travar em uma operação sem sentido.
+
+Formalmente, a corretude é enunciada como:
+
+\begin{quote}
+  \textbf{Teorema (Type Soundness):} Se \(\vdash t : T\) e \(t \to^*
+  t'\), então \(t'\) é um valor ou existe \(t''\) tal que \(t' \to t''\).
+\end{quote}
+
+Em português: \emph{programas bem tipados não ficam presos}. A prova
+deste teorema se apoia em dois lemas: o de preservação e o de progresso.
+
+\subsection{Lema de Preservação}
+
+\begin{quote}
+  \textbf{Lema de Preservação (\emph{Preservation}):} Se \(\vdash t : T\) e
+  \(t \to t'\), então \(\vdash t' : T\).
+\end{quote}
+
+Este lema afirma que \textbf{a tipagem é invariante sob redução}: se
+um termo tem tipo \(T\) e dá um passo de execução, o termo resultante
+ainda tem o mesmo tipo \(T\). O tipo é \emph{preservado} ao longo de
+toda a computação.
+
+\textbf{Por que é importante?} Sem a preservação, um termo poderia
+começar com tipo correto e, após algumas reduções, tornar-se um termo
+de tipo diferente, o que quebraria qualquer garantia que o
+verificador de tipos tentasse fornecer. A preservação garante que a
+``etiqueta de tipo'' permanece coerente em cada passo.
+
+\textbf{Prova:} Por indução na derivação de \(t \to t'\), analisando
+cada regra de redução.
+
+\emph{Caso} (E-IfTrue): \(t =
+\mathbf{if}\ \mathbf{true}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\)
+e \(t' = t_2\). Como \(\vdash t : T\) foi derivado por (T-If), temos
+\(\vdash \mathbf{true} : \mathbf{Bool}\), \(\vdash t_2 : T\) e
+\(\vdash t_3 : T\). Logo \(\vdash t' = t_2 : T\).
+
+\emph{Caso} (E-IfFalse): \(t =
+\mathbf{if}\ \mathbf{false}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\)
+e \(t' = t_3\). Analogamente, de (T-If) obtemos \(\vdash t_3 : T\),
+portanto \(\vdash t' : T\).
+
+\emph{Caso} (E-If): \(t =
+\mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\) com \(t_1
+\to t_1'\) e \(t' =
+\mathbf{if}\ t_1'\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\). De
+(T-If) temos \(\vdash t_1 : \mathbf{Bool}\), \(\vdash t_2 : T\) e
+\(\vdash t_3 : T\). Pela hipótese de indução aplicada a \(t_1 \to
+t_1'\), obtemos \(\vdash t_1' : \mathbf{Bool}\). Aplicando (T-If),
+concluímos \(\vdash t' : T\).
+
+\emph{Caso} (E-Succ): \(t = \mathbf{succ}\ t_1\) com \(t_1 \to t_1'\)
+e \(t' = \mathbf{succ}\ t_1'\). De (T-Succ) temos \(\vdash t_1 :
+\mathbf{Nat}\). Pela hipótese de indução, \(\vdash t_1' :
+\mathbf{Nat}\). Aplicando (T-Succ), concluímos \(\vdash
+\mathbf{succ}\ t_1' : \mathbf{Nat}\).
+
+\emph{Caso} (E-Pred): \(t = \mathbf{pred}\ t_1\) com \(t_1 \to t_1'\)
+e \(t' = \mathbf{pred}\ t_1'\). De (T-Pred) temos \(\vdash t_1 :
+\mathbf{Nat}\). Pela hipótese de indução, \(\vdash t_1' :
+\mathbf{Nat}\). Aplicando (T-Pred), concluímos \(\vdash
+\mathbf{pred}\ t_1' : \mathbf{Nat}\).
+
+\emph{Caso} (E-PredZero): \(t = \mathbf{pred}\ \mathbf{0}\) e \(t' =
+\mathbf{0}\). De (T-Pred) e (T-Zero) temos \(\vdash \mathbf{0} :
+\mathbf{Nat}\), logo \(\vdash t' : \mathbf{Nat}\).
+
+\emph{Caso} (E-PredSucc): \(t =
+\mathbf{pred}\ (\mathbf{succ}\ nv_1)\) e \(t' = nv_1\). De (T-Pred)
+temos \(\vdash \mathbf{succ}\ nv_1 : \mathbf{Nat}\); de (T-Succ)
+obtemos \(\vdash nv_1 : \mathbf{Nat}\). Logo \(\vdash t' : \mathbf{Nat}\).
+
+\emph{Caso} (E-IsZero): \(t = \mathbf{iszero}\ t_1\) com \(t_1 \to
+t_1'\) e \(t' = \mathbf{iszero}\ t_1'\). De (T-IsZero) temos \(\vdash
+t_1 : \mathbf{Nat}\). Pela hipótese de indução, \(\vdash t_1' :
+\mathbf{Nat}\). Aplicando (T-IsZero), concluímos \(\vdash
+\mathbf{iszero}\ t_1' : \mathbf{Bool}\).
+
+\emph{Caso} (E-IsZeroZero): \(t = \mathbf{iszero}\ \mathbf{0}\) e
+\(t' = \mathbf{true}\). Por (T-True), \(\vdash \mathbf{true} :
+\mathbf{Bool}\); e de (T-IsZero) o tipo de \(t\) é \(\mathbf{Bool}\).
+Logo \(\vdash t' : \mathbf{Bool}\).
+
+\emph{Caso} (E-IsZeroSucc): \(t =
+\mathbf{iszero}\ (\mathbf{succ}\ nv_1)\) e \(t' = \mathbf{false}\).
+Por (T-False), \(\vdash \mathbf{false} : \mathbf{Bool}\); e de
+(T-IsZero) o tipo de \(t\) é \(\mathbf{Bool}\). Logo \(\vdash t' :
+\mathbf{Bool}\).
+
+Como todos os casos da relação de redução estão cobertos, o lema está
+demonstrado.
+
+\subsection{Lema de Progresso}
+
+\begin{quote}
+  \textbf{Lema de Progresso (\emph{Progress}):} Se \(\vdash t : T\), então
+  \(t\) é um valor ou existe \(t'\) tal que \(t \to t'\).
+\end{quote}
+
+Este lema afirma que \textbf{termos bem tipados nunca ficam presos}:
+a cada passo de execução, ou o termo já é um valor (a computação
+terminou), ou existe pelo menos uma redução possível (a computação
+pode continuar).
+
+\textbf{Por que é importante?} Um termo preso é um programa em um
+estado de erro irrecuperável, como tentar aplicar
+\haskell{pred} a um booleano. O lema de progresso
+garante que isso nunca acontece para termos bem tipados: o sistema de
+tipos elimina exatamente os termos que poderiam ficar presos.
+
+\textbf{Prova:} Por indução estrutural na derivação de \(\vdash t : T\).
+
+\emph{Caso} (T-True): \(t = \mathbf{true}\) é um valor.
+
+\emph{Caso} (T-False): \(t = \mathbf{false}\) é um valor.
+
+\emph{Caso} (T-Zero): \(t = \mathbf{0}\) é um valor numérico, portanto um valor.
+
+\emph{Caso} (T-If): \(t =
+\mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\) com
+\(\vdash t_1 : \mathbf{Bool}\). Pela hipótese de indução aplicada a
+\(t_1\): ou \(t_1\) é valor, ou existe \(t_1'\) tal que \(t_1 \to t_1'\).
+
+\begin{itemize}
+  \item Se \(t_1 \to t_1'\): aplica-se (E-If), obtendo \(t \to
+    \mathbf{if}\ t_1'\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3\).
+  \item Se \(t_1\) é valor de tipo \(\mathbf{Bool}\): pelo lema de
+    unicidade de tipos, \(t_1\) não pode ser um valor numérico \(nv\)
+    (que tem tipo \(\mathbf{Nat}\)). Portanto \(t_1 \in
+    \{\mathbf{true}, \mathbf{false}\}\).
+
+    \begin{itemize}
+      \item Se \(t_1 = \mathbf{true}\): aplica-se (E-IfTrue), \(t \to t_2\).
+      \item Se \(t_1 = \mathbf{false}\): aplica-se (E-IfFalse), \(t \to t_3\).
+    \end{itemize}
+\end{itemize}
+
+\emph{Caso} (T-Succ): \(t = \mathbf{succ}\ t_1\) com \(\vdash t_1 :
+\mathbf{Nat}\). Pela hipótese de indução aplicada a \(t_1\): ou
+\(t_1\) é valor, ou reduz.
+
+\begin{itemize}
+  \item Se \(t_1 \to t_1'\): aplica-se (E-Succ), \(t \to \mathbf{succ}\ t_1'\).
+  \item Se \(t_1\) é valor de tipo \(\mathbf{Nat}\): pelo lema de
+    unicidade, \(t_1\) não pode ser \(\mathbf{true}\) nem
+    \(\mathbf{false}\) (que têm tipo \(\mathbf{Bool}\)), portanto
+    \(t_1\) é um valor numérico \(nv\). Logo \(t =
+    \mathbf{succ}\ nv\) é também um valor numérico.
+\end{itemize}
+
+\emph{Caso} (T-Pred): \(t = \mathbf{pred}\ t_1\) com \(\vdash t_1 :
+\mathbf{Nat}\). Pela hipótese de indução aplicada a \(t_1\): ou
+\(t_1\) é valor, ou reduz.
+
+\begin{itemize}
+  \item Se \(t_1 \to t_1'\): aplica-se (E-Pred), \(t \to \mathbf{pred}\ t_1'\).
+  \item Se \(t_1\) é valor de tipo \(\mathbf{Nat}\): pelo lema de
+    unicidade, \(t_1\) é um valor numérico \(nv\). Há dois subcasos:
+    \begin{itemize}
+      \item \(nv = \mathbf{0}\): aplica-se (E-PredZero), \(t \to \mathbf{0}\).
+      \item \(nv = \mathbf{succ}\ nv_1\): aplica-se (E-PredSucc), \(t
+        \to nv_1\).
+    \end{itemize}
+\end{itemize}
+
+\emph{Caso} (T-IsZero): \(t = \mathbf{iszero}\ t_1\) com \(\vdash t_1
+: \mathbf{Nat}\). Pela hipótese de indução aplicada a \(t_1\): ou
+\(t_1\) é valor, ou reduz.
+\begin{itemize}
+  \item Se \(t_1 \to t_1'\): aplica-se (E-IsZero), \(t \to
+    \mathbf{iszero}\ t_1'\).
+  \item Se \(t_1\) é valor de tipo \(\mathbf{Nat}\): pelo lema de
+    unicidade, \(t_1\) é um valor numérico \(nv\). Há dois subcasos:
+    \begin{itemize}
+      \item \(nv = \mathbf{0}\): aplica-se (E-IsZeroZero), \(t \to
+        \mathbf{true}\).
+      \item \(nv = \mathbf{succ}\ nv_1\): aplica-se (E-IsZeroSucc), \(t
+        \to \mathbf{false}\).
+    \end{itemize}
+\end{itemize}
+
+Como todos os casos da derivação de tipagem estão cobertos, o lema
+está demonstrado.
+
+\subsection{Da Preservação e do Progresso à Corretude}
+
+Com os dois lemas, a prova de corretude é imediata:
+
+\begin{quote}
+  \textbf{Prova do Teorema (Type Soundness):} Seja \(\vdash t : T\) e
+  \(t \to^* t'\). Queremos mostrar que \(t'\) é valor ou pode reduzir.
+
+  Por \textbf{preservação}, como \(\vdash t : T\) e \(t \to^* t'\),
+  temos \(\vdash t' : T\) (aplicando o lema de preservação em cada
+  passo da sequência de reduções, por indução no comprimento da sequência).
+
+  Por \textbf{progresso}, como \(\vdash t' : T\), \(t'\) é valor ou
+  existe \(t''\) tal que \(t' \to t''\).
+\end{quote}
+
+A contribuição de cada lema é distinta e indispensável:
+
+\begin{table}[H]
+  \begin{tabular}{
+      >{\raggedright\arraybackslash}p{0.20\linewidth}
+      >{\raggedright\arraybackslash}p{0.35\linewidth}
+      >{\raggedright\arraybackslash}p{0.35\linewidth}
+    }
+    \toprule
+    \textbf{Lema} & \textbf{Garante} & \textbf{Sem ele, poderia acontecer} \\
+    \midrule
+    Preservação & O tipo se mantém durante a execução & Um passo de
+    redução muda o tipo e o progresso não se aplica ao resultado \\
+    \addlinespace
+    Progresso & Termos bem tipados não ficam presos & O tipo se
+    mantém, mas a execução trava mesmo assim \\
+    \bottomrule
+  \end{tabular}
+  \centering
+\end{table}
+
+A vantagem desta abordagem é que ela \textbf{decompõe a corretude} em
+dois lemas independentes e mais simples, cada um demonstrável por
+indução. A prova de progresso usa \emph{apenas} as regras de tipagem;
+a prova de preservação usa \emph{apenas} as regras de tipagem e as de redução.
+
+% ============================================================
+\section{Sistema de Tipos para TLine}
+% ============================================================
+
+TLine é uma linguagem imperativa simples com declaração de variáveis
+tipadas, atribuição, leitura e impressão. Os seus tipos são
+\(\mathbf{Int}\), \(\mathbf{Bool}\) e \(\mathbf{String}\). A
+principal novidade em relação a TExp é a presença de
+\textbf{variáveis}, o que torna necessário um \textbf{contexto de tipagem}:
+
+\[
+  \Gamma : \mathit{Var} \rightharpoonup \mathit{Ty}
+\]
+
+\subsection{Regras de Tipagem para Expressões}
+
+As regras têm a forma \(\Gamma \vdash e : T\):
+
+\[
+  \frac{}{\Gamma \vdash n : \mathbf{Int}} \quad\text{(T-Int)}
+  \qquad
+  \frac{}{\Gamma \vdash b : \mathbf{Bool}} \quad\text{(T-Bool)}
+  \qquad
+  \frac{}{\Gamma \vdash s : \mathbf{String}} \quad\text{(T-String)}
+\]
+
+\[
+  \frac{x \in \mathrm{dom}(\Gamma)}{\Gamma \vdash x : \Gamma(x)}
+  \quad\text{(T-Var)}
+\]
+
+\[
+  \frac{\Gamma \vdash e_1 : \mathbf{Int} \quad \Gamma \vdash e_2 : \mathbf{Int}}
+  {\Gamma \vdash e_1 \oplus e_2 : \mathbf{Int}} \quad\text{(T-ArithOp)}
+  \qquad
+  \frac{\Gamma \vdash e_1 : \mathbf{Int} \quad \Gamma \vdash e_2 : \mathbf{Int}}
+  {\Gamma \vdash e_1 \otimes e_2 : \mathbf{Bool}} \quad\text{(T-CmpOp)}
+\]
+
+\[
+  \frac{\Gamma \vdash e : \mathbf{Bool}}
+  {\Gamma \vdash \neg e : \mathbf{Bool}} \quad\text{(T-Not)}
+\]
+
+onde \(\oplus \in \{+, -, \star, /\}\) e \(\otimes \in \{<, =\}\).
+
+\subsection{Regras de Tipagem para Comandos}
+
+As regras têm a forma \(\Gamma \vdash s \dashv \Gamma'\), onde
+\(\Gamma'\) é o contexto produzido após verificar o comando \(s\):
+
+\[
+  \frac{\Gamma \vdash e : T}
+  {\Gamma \vdash \mathbf{var}\ x : T = e \dashv \Gamma[x \mapsto T]}
+  \quad\text{(T-Decl)}
+\]
+
+\[
+  \frac{x \in \mathrm{dom}(\Gamma) \quad \Gamma \vdash e : \Gamma(x)}
+  {\Gamma \vdash x \mathbin{:=} e \dashv \Gamma} \quad\text{(T-Assign)}
+\]
+
+\[
+  \frac{\Gamma \vdash e_p : \mathbf{String} \quad x \in
+  \mathrm{dom}(\Gamma) \quad \Gamma(x) = \mathbf{Int}}
+  {\Gamma \vdash \mathbf{read}\ e_p\ x \dashv \Gamma} \quad\text{(T-Read)}
+\]
+
+\[
+  \frac{\Gamma \vdash e : T}
+  {\Gamma \vdash \mathbf{print}\ e \dashv \Gamma} \quad\text{(T-Print)}
+\]
+
+A regra (T-Decl) é a única que \textbf{estende} o contexto: declara
+\(x\) com tipo \(T\), produzindo \(\Gamma' = \Gamma[x \mapsto T]\).
+As demais \textbf{preservam} o contexto: \(\Gamma' = \Gamma\).
+
+% ============================================================
+\section{Sistema de Tipos para TWhile}
+% ============================================================
+
+TWhile estende TLine com condicionais e repetição:
+
+\begin{itemize}
+  \item \(\mathbf{if}\ e\ \mathbf{then}\ B_1\ \mathbf{else}\ B_2\):
+    executa o bloco \(B_1\) se \(e\) for verdadeiro, \(B_2\) caso contrário.
+  \item \(\mathbf{while}\ e\ \mathbf{do}\ B\): repete o bloco \(B\)
+    enquanto \(e\) for verdadeiro.
+\end{itemize}
+
+A novidade semântica fundamental é o \textbf{escopo léxico}: variáveis
+declaradas dentro de um bloco \(\mathbf{if}\) ou \(\mathbf{while}\)
+não são visíveis fora dele. Isso é formalizado pelas regras de tipagem:
+o contexto de \textbf{saída} é sempre o contexto de
+\textbf{entrada} \(\Gamma\), independentemente das declarações
+internas aos blocos.
+
+\subsection{Regras de Tipagem para os Novos Comandos}
+
+\[
+  \frac{\Gamma \vdash e : \mathbf{Bool}
+    \quad \Gamma \vdash B_1 \dashv \Gamma_1
+  \quad \Gamma \vdash B_2 \dashv \Gamma_2}
+  {\Gamma \vdash
+  \mathbf{if}\ e\ \mathbf{then}\ B_1\ \mathbf{else}\ B_2 \dashv \Gamma}
+  \quad\text{(T-If)}
+\]
+
+\[
+  \frac{\Gamma \vdash e : \mathbf{Bool}
+  \quad \Gamma \vdash B \dashv \Gamma'}
+  {\Gamma \vdash \mathbf{while}\ e\ \mathbf{do}\ B \dashv \Gamma}
+  \quad\text{(T-While)}
+\]
+
+O contexto de saída em (T-If) é \(\Gamma\), e \textbf{não}
+\(\Gamma_1\) nem \(\Gamma_2\). Os contextos \(\Gamma_1\) e \(\Gamma_2\)
+são descartados ao sair dos blocos, de modo que variáveis locais a
+cada ramo não escapam para o escopo externo. O mesmo vale para
+(T-While): \(\Gamma'\) é descartado e o contexto retorna a \(\Gamma\).
+
+% ============================================================
+\section{Sistema de Tipos para Funções e Registros}
+% ============================================================
+
+A linguagem TImp estende TWhile com declarações de funções e de tipos
+registro. Essas duas extensões exigem enriquecer os ambientes de
+tipagem e adicionar novas regras ao sistema. Nesta seção
+apresentamos o sistema de tipos de TImp de forma completa.
+
+% ------------------------------------------------------------
+\subsection{Tipos, Contextos e Ambientes}
+% ------------------------------------------------------------
+
+\paragraph{Tipos.}
+
+\[
+  \tau \;::=\; \mathbf{Int} \mid \mathbf{Bool} \mid \mathbf{String}
+               \mid R
+  \qquad\qquad
+  \rho \;::=\; \mathbf{void} \mid \tau
+\]
+
+O tipo \(R\) é um \textbf{tipo registro} nomeado; \(\rho\) é o tipo de
+retorno de funções: ou o tipo unitário \(\mathbf{void}\) (sem valor
+de retorno) ou um tipo \(\tau\).
+
+\paragraph{Contexto de variáveis.}
+
+\[
+  \Gamma : \mathit{Var} \rightharpoonup \tau
+\]
+
+\paragraph{Ambiente de registros.}
+
+\[
+  \Delta : \mathit{Name} \rightharpoonup \overline{(f_i : \tau_i)}
+\]
+
+\(\Delta(R)\) lista os campos e seus tipos para o tipo registro \(R\).
+Escreve-se \(\Delta(R)(f)\) para o tipo do campo \(f\) em \(R\).
+
+\paragraph{Ambiente de funções.}
+
+\[
+  \Phi : \mathit{Name} \rightharpoonup ([\tau_1,\ldots,\tau_n],\; \rho)
+\]
+
+\(\Phi(f)\) fornece a lista de tipos dos parâmetros e o tipo de
+retorno de \(f\). Ambos \(\Delta\) e \(\Phi\) são construídos das
+declarações do programa e permanecem \emph{imutáveis} durante a
+verificação.
+
+A relação de tipagem de expressões torna-se
+\(\Gamma;\Delta;\Phi \vdash e : \tau\).
+A de comandos torna-se \(\Gamma;\Delta;\Phi;\rho_{\mathit{ret}}
+\vdash s \dashv \Gamma'\), onde \(\rho_{\mathit{ret}}\) é o tipo de
+retorno esperado da função corrente (ou \(\mathbf{void}\) no nível
+superior). Por brevidade, omitimos \(\Delta\), \(\Phi\) e
+\(\rho_{\mathit{ret}}\) quando não são necessários numa regra.
+
+% ------------------------------------------------------------
+\subsection{Regras de Tipagem para Registros}
+% ------------------------------------------------------------
+
+\subsubsection{Expressões}
+
+\textbf{Acesso a campo:}
+
+\[
+  \infer[\text{(T-Field)}]
+  {\Gamma;\Delta;\Phi \vdash e.f : \tau}
+  {\Gamma;\Delta;\Phi \vdash e : R
+   \quad R \in \mathrm{dom}(\Delta)
+   \quad \Delta(R)(f) = \tau}
+\]
+
+\textbf{Construção de registro:}
+
+\[
+  \infer[\text{(T-New)}]
+  {\Gamma;\Delta;\Phi \vdash \mathbf{new}\; R\,\{f_1\!=\!e_1,\ldots,f_n\!=\!e_n\} : R}
+  {R \in \mathrm{dom}(\Delta)
+   \quad \Delta(R) = \overline{(f_i:\tau_i)}
+   \quad \Gamma;\Delta;\Phi \vdash e_i : \tau_i \;\;(\forall\,i)}
+\]
+
+A regra (T-New) exige que o conjunto de campos fornecidos coincida
+exatamente com o conjunto de campos declarados em \(\Delta(R)\) e que
+cada campo tenha o tipo correto.
+
+\subsubsection{Comandos}
+
+\textbf{Atribuição de campo:}
+
+\[
+  \infer[\text{(T-FieldAssign)}]
+  {\Gamma;\Delta;\Phi \vdash x.f \mathbin{:=} e \dashv \Gamma}
+  {\Gamma(x) = R
+   \quad \Delta(R)(f) = \tau
+   \quad \Gamma;\Delta;\Phi \vdash e : \tau}
+\]
+
+% ------------------------------------------------------------
+\subsection{Regras de Tipagem para Funções}
+% ------------------------------------------------------------
+
+\subsubsection{Chamadas de função}
+
+\textbf{Chamada como expressão} (função não-\texttt{void}):
+
+\[
+  \infer[\text{(T-CallExpr)}]
+  {\Gamma;\Delta;\Phi \vdash f(e_1,\ldots,e_n) : \tau}
+  {\Phi(f) = ([\tau_1,\ldots,\tau_n],\; \tau)
+   \quad \Gamma;\Delta;\Phi \vdash e_i : \tau_i \;\;(\forall\,i)}
+\]
+
+\textbf{Chamada como comando} (função \texttt{void}):
+
+\[
+  \infer[\text{(T-CallStmt)}]
+  {\Gamma;\Delta;\Phi \vdash f(e_1,\ldots,e_n) \dashv \Gamma}
+  {\Phi(f) = ([\tau_1,\ldots,\tau_n],\; \mathbf{void})
+   \quad \Gamma;\Delta;\Phi \vdash e_i : \tau_i \;\;(\forall\,i)}
+\]
+
+A distinção entre (T-CallExpr) e (T-CallStmt) é essencial: só funções
+\texttt{void} podem ser usadas como comandos; usar uma função
+não-\texttt{void} como comando desperdiçaria o valor de retorno e é
+considerado um erro de tipo.
+
+\subsubsection{Retorno}
+
+As regras de tipagem para \textbf{return} dependem do tipo de retorno
+\(\rho_{\mathit{ret}}\) da função corrente, propagado pelo ambiente de
+tipagem:
+
+\[
+  \infer[\text{(T-RetVal)}]
+  {\Gamma;\ldots;\rho_{\mathit{ret}} \vdash \mathbf{return}\; e \dashv \Gamma}
+  {\rho_{\mathit{ret}} = \tau
+   \quad \Gamma;\Delta;\Phi \vdash e : \tau}
+\]
+
+\[
+  \infer[\text{(T-RetVoid)}]
+  {\Gamma;\ldots;\rho_{\mathit{ret}} \vdash \mathbf{return} \dashv \Gamma}
+  {\rho_{\mathit{ret}} = \mathbf{void}}
+\]
+
+\subsubsection{Declaração de função}
+
+A tipagem de uma declaração de função verifica o corpo sob um contexto
+inicial formado pelos parâmetros formais, com \(\rho_{\mathit{ret}}\)
+fixado ao tipo de retorno declarado:
+
+\[
+  \infer[\text{(T-FuncDecl)}]
+  {\Delta;\Phi \vdash \mathbf{fn}\; f(\overline{x_i:\tau_i}): \rho\; \{B\} \;\checkmark}
+  {[x_1\!\mapsto\!\tau_1,\ldots,x_n\!\mapsto\!\tau_n];\Delta;\Phi;\rho
+   \vdash B \dashv \_}
+\]
+
+O contexto de saída do bloco é descartado: parâmetros e variáveis
+locais à função não são visíveis no nível superior.
+
+% ------------------------------------------------------------
+\subsection{Exemplo de Derivação de Tipo}
+% ------------------------------------------------------------
+
+Considere a expressão \(\mathbf{new}\;
+\mathtt{Point}\,\{x\!=\!3,\, y\!=\!4\}.x + 1\) com
+\(\Delta(\mathtt{Point}) = [(x:\mathbf{Int}),\, (y:\mathbf{Int})]\) e
+\(\Gamma = \emptyset\):
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{
+        \dfrac{}{\vdash 3 : \mathbf{Int}}
+        \quad
+        \dfrac{}{\vdash 4 : \mathbf{Int}}
+      }{\vdash \mathbf{new}\;\mathtt{Point}\{x\!=\!3,y\!=\!4\} : \mathtt{Point}}
+      \quad \Delta(\mathtt{Point})(x) = \mathbf{Int}
+    }{\vdash (\mathbf{new}\;\mathtt{Point}\{x\!=\!3,y\!=\!4\}).x : \mathbf{Int}}
+    \quad
+    \dfrac{}{\vdash 1 : \mathbf{Int}}
+  }{\vdash (\mathbf{new}\;\mathtt{Point}\{x\!=\!3,y\!=\!4\}).x + 1 : \mathbf{Int}}
+\]
+
+% ------------------------------------------------------------
+\subsection{Extensão da Corretude}
+% ------------------------------------------------------------
+
+As propriedades de preservação e de progresso estendem-se
+naturalmente para TImp. Dois aspectos merecem nota:
+
+\begin{itemize}
+  \item \textbf{Preservação} para (T-Field) requer que o valor
+    \(\mathbf{rec}(R, \mathit{flds})\) tenha os campos esperados por
+    \(\Delta(R)\), invariante mantido por (T-New) e (T-FieldAssign).
+  \item \textbf{Progresso} para chamadas de função requer que o corpo
+    de \(f\) termine com um \(\mathbf{return}\; e\) quando \(\rho \neq
+    \mathbf{void}\). A regra (T-FuncDecl) tipifica o corpo, mas a
+    garantia de que toda execução efetivamente atinge um
+    \haskell{return} exige \textbf{análise de fluxo de controlo}
+    (verificação de retorno garantido), que está além do escopo deste
+    capítulo.
+\end{itemize}
+
+% ============================================================
+\section{Conclusão}
+
+Neste capítulo, estudamos os fundamentos dos sistemas de tipos em
+linguagens de programação. Vimos que tipos classificam os valores de
+uma linguagem e restringem as operações admissíveis, e que a
+verificação de tipos pode ocorrer em tempo de compilação (tipagem
+estática) ou em tempo de execução (tipagem dinâmica).
+Ortogonalmente, uma linguagem pode ser fortemente tipada, proibindo
+conversões implícitas entre tipos incompatíveis, ou fracamente
+tipada, admitindo tais coerções de forma automática.
+
+Para dar uma base formal a esses conceitos, utilizamos a linguagem de
+expressões tipadas de Pierce, que combina booleanos e números
+naturais. O seu sistema de tipos é definido por regras de inferência
+da forma \(\vdash t : T\), que atribuem um tipo a cada termo de
+maneira única, propriedade expressa pelo lema de unicidade de
+tipos. A semântica small-step descreve a execução como uma sequência
+de reduções \(t \to t'\) e torna explícito o conceito de
+\textbf{formas presas} (\emph{stuck terms}): termos que não são
+valores e para os quais nenhuma regra de redução se aplica,
+representando erros irrecuperáveis em tempo de execução. A semântica
+big-step, por sua vez, relaciona cada termo diretamente ao seu valor
+final \(t \Downarrow v\), abstraindo os passos intermediários.
+
+A propriedade central que justifica a utilidade da tipagem estática é
+a \textbf{corretude do sistema de tipos} (\emph{type soundness}):
+programas bem tipados nunca ficam presos. Demonstramos essa
+propriedade pela composição de dois lemas independentes. O lema de
+\textbf{preservação} garante que cada passo de redução mantém o tipo
+do termo: a informação de tipo não se corrompe durante a execução.
+O lema de \textbf{progresso} garante que um termo bem tipado que
+ainda não é valor sempre pode dar um passo de redução, de modo que a execução
+nunca trava. Juntos, os dois lemas asseguram que toda computação a
+partir de um termo bem tipado avança indefinidamente ou termina em um
+valor, nunca numa forma presa.
+
+Estendemos o formalismo para linguagens imperativas apresentando os
+sistemas de tipos de TLine, TWhile e TImp. Para TLine, a presença de
+variáveis exige um contexto \(\Gamma\) e as regras distinguem
+declaração (que estende \(\Gamma\)) de atribuição (que o preserva).
+Para TWhile, a adição de condicionais e repetição com escopo léxico é
+formalizada pelas regras (T-If) e (T-While), que mantêm o contexto de
+saída igual ao de entrada, descartando variáveis declaradas internamente.
+Para TImp, funções e registros introduzem dois ambientes globais
+imutáveis (\(\Delta\) para registros e \(\Phi\) para funções),
+além do tipo de retorno esperado \(\rho_{\mathit{ret}}\) por função. A
+implementação desses verificadores de tipos é tratada no próximo capítulo.

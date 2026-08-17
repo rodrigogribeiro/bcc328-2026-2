@@ -1,0 +1,18 @@
+func factorial(n) {
+  SEQ(CJUMP(BINOP(EQ, TEMP(n), CONST(0)), base_0, rec_1),
+      SEQ(LABEL(base_0),
+          SEQ(RETURN(CONST(1)),
+              SEQ(LABEL(rec_1),
+                  SEQ(RETURN(BINOP(MUL,
+                                   TEMP(n),
+                                   CALL(NAME(factorial),
+                                        BINOP(SUB, TEMP(n), CONST(1))))),
+                      LABEL(end_2))))))
+}
+func main() {
+  SEQ(EXP(CALL(NAME(print), CALL(NAME(factorial), CONST(0)))),
+      SEQ(EXP(CALL(NAME(print), CALL(NAME(factorial), CONST(1)))),
+          SEQ(EXP(CALL(NAME(print), CALL(NAME(factorial), CONST(5)))),
+              SEQ(EXP(CALL(NAME(print), CALL(NAME(factorial), CONST(10)))),
+                  RETURN()))))
+}

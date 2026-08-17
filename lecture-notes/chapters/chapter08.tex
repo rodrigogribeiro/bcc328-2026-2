@@ -1,0 +1,638 @@
+\chapter{Análise sintática LL(1)}
+
+\section{Introdução}
+
+Nos capítulos anteriores, apresentamos duas técnicas para análise
+sintática descendente: combinadores de parsing e Parsing Expression
+Grammars. Ambas constroem uma derivação iniciando pelo símbolo
+inicial da gramática e, a cada passo, escolhem uma regra para
+expandir o não-terminal mais à esquerda.
+
+Neste capítulo, estudamos outro algoritmo descendente: o
+\textbf{analisador LL(1)}. O nome tem três componentes:
+
+\begin{itemize}
+  \item
+    O primeiro \textbf{L} indica que a entrada é lida da
+    \textbf{esquerda para a direita} (\emph{left-to-right}).
+  \item
+    O segundo \textbf{L} indica que o analisador produz uma
+    \textbf{derivação mais à esquerda} (\emph{leftmost derivation}).
+  \item
+    O \textbf{1} indica que o analisador usa apenas \textbf{um
+    símbolo de lookahead} para decidir qual produção aplicar.
+\end{itemize}
+
+A ideia central é substituir a recursão por um \textbf{algoritmo
+dirigido por tabela}: uma tabela de parsing \(M[A, a]\) indica, para
+cada não-terminal \(A\) e cada terminal \(a\) (incluindo o marcador
+de fim de entrada \(\$\)), qual produção deve ser aplicada, ou
+sinaliza um erro sintático.
+
+O código discutido neste capítulo está em
+\begin{flushleft}
+  \verb|Parsing/LL/BuildTable.hs| e\\
+  \verb|Parsing/LL/Parser.hs|
+\end{flushleft}
+
+\section{Exemplo Informal}
+
+Considere a gramática de expressões aritméticas a seguir (sem
+recursão à esquerda, fatorada à esquerda):
+
+\[
+  \begin{array}{lcl}
+    E  & \to & T\; E' \\
+    E' & \to & +\; T\; E' \mid \lambda \\
+    T  & \to & F\; T' \\
+    T' & \to & *\; F\; T' \mid \lambda \\
+    F  & \to & (\; E\; ) \mid \mathbf{n}
+  \end{array}
+\]
+
+e a entrada \haskell{n + n}. O analisador LL(1)
+mantém uma \textbf{pilha} de símbolos que representa o que ainda
+falta reconhecer. Inicialmente a pilha contém o símbolo inicial
+seguido de \(\$\). A tabela a seguir mostra os passos para reconhecer
+a string \haskell{n + n}:
+
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{lll}
+    \toprule
+    Pilha & Entrada & Ação \\
+    \midrule
+    $E\;\$$ & $\mathbf{n}\;+\;\mathbf{n}\;\$$ & Consultar $M[E,
+    \mathbf{n}]$: aplicar $E \to T\;E'$ \\
+    $T\;E'\;\$$ & $\mathbf{n}\;+\;\mathbf{n}\;\$$ & Consultar $M[T,
+    \mathbf{n}]$: aplicar $T \to F\;T'$ \\
+    $F\;T'\;E'\;\$$ & $\mathbf{n}\;+\;\mathbf{n}\;\$$ & Consultar
+    $M[F, \mathbf{n}]$: aplicar $F \to \mathbf{n}$ \\
+    $\mathbf{n}\;T'\;E'\;\$$ & $\mathbf{n}\;+\;\mathbf{n}\;\$$ &
+    Casar: consumir $\mathbf{n}$ \\
+    $T'\;E'\;\$$ & $+\;\mathbf{n}\;\$$ & Consultar $M[T', +]$:
+    aplicar $T' \to \lambda$ \\
+    $E'\;\$$ & $+\;\mathbf{n}\;\$$ & Consultar $M[E', +]$: aplicar
+    $E' \to +\;T\;E'$ \\
+    $+\;T\;E'\;\$$ & $+\;\mathbf{n}\;\$$ & Casar: consumir $+$ \\
+    $T\;E'\;\$$ & $\mathbf{n}\;\$$ & Consultar $M[T, \mathbf{n}]$:
+    aplicar $T \to F\;T'$ \\
+    $F\;T'\;E'\;\$$ & $\mathbf{n}\;\$$ & Consultar $M[F,
+    \mathbf{n}]$: aplicar $F \to \mathbf{n}$ \\
+    $\mathbf{n}\;T'\;E'\;\$$ & $\mathbf{n}\;\$$ & Casar: consumir
+    $\mathbf{n}$ \\
+    $T'\;E'\;\$$ & $\$$ & Consultar $M[T', \$]$: aplicar $T' \to \lambda$ \\
+    $E'\;\$$ & $\$$ & Consultar $M[E', \$]$: aplicar $E' \to \lambda$ \\
+    $\$$ & $\$$ & \textbf{Aceitar} \\
+    \bottomrule
+  \end{tabular}
+  \caption{Simulação do analisador preditivo para $\mathbf{n}+\mathbf{n}$}
+\end{table}
+
+Em cada passo, o analisador observa o topo da pilha e o símbolo
+corrente da entrada:
+
+\begin{itemize}
+  \item
+    Se o topo é um \textbf{terminal} igual ao símbolo corrente, ele é
+    consumido da entrada e removido da pilha (casamento).
+  \item
+    Se o topo é um \textbf{não-terminal} \(A\), consulta-se \(M[A,
+    a]\) para obter a produção a aplicar. O não-terminal é removido e
+    os símbolos do corpo da produção são empilhados em ordem (o
+    primeiro símbolo da produção fica no topo).
+  \item
+    Se o topo e a entrada são ambos \(\$\), a entrada foi aceita.
+  \item
+    Qualquer outra situação é um erro sintático.
+\end{itemize}
+
+Note que o problema central em um analisador LL(1) consiste em
+construir a tabela. Esse será o assunto das próximas seções.
+
+\section{Construção da tabela LL(1)}
+
+Para construir a tabela de parsing, precisamos de três conceitos,
+definidos a seguir.
+
+\subsection{Anulável}
+
+Um não-terminal \(A\) é \textbf{anulável} se pode derivar a cadeia
+vazia em um número qualquer de passos:
+
+\[
+  A \Rightarrow^* \lambda
+\]
+
+Uma sequência de símbolos \(\alpha = X_1\, X_2\, \cdots\, X_n\) é
+anulável se \textbf{todos} os \(X_i\) são anuláveis. A sequência
+vazia é trivialmente anulável.
+
+\subsection{Conjunto FIRST}
+
+O conjunto \(\mathrm{FIRST}(\alpha)\) de uma sequência de símbolos
+\(\alpha\) é o conjunto de terminais que podem iniciar uma cadeia
+derivada de \(\alpha\):
+
+\[
+  \mathrm{FIRST}(\alpha) = \{\, a \in \Sigma \mid \alpha
+  \Rightarrow^* a\,\beta \,\}
+\]
+
+Adicionalmente, incluímos \(\lambda\) em \(\mathrm{FIRST}(\alpha)\)
+se \(\alpha\) é anulável.
+
+As regras de cálculo para uma sequência \(X_1\, X_2\, \cdots\, X_n\) são:
+
+\begin{enumerate}
+  \item
+    Se a sequência é vazia: \(\mathrm{FIRST}(\varepsilon) = \{\lambda\}\).
+  \item
+    Se \(X_1\) é um terminal \(a\): \(\mathrm{FIRST}(X_1 \cdots X_n) = \{a\}\).
+  \item
+    Se \(X_1\) é um não-terminal:
+
+    \begin{itemize}
+      \item
+        Incluir \(\mathrm{FIRST}(X_1) - \{\lambda\}\).
+      \item
+        Se \(\lambda \in \mathrm{FIRST}(X_1)\), incluir também
+        \(\mathrm{FIRST}(X_2 \cdots X_n)\).
+    \end{itemize}
+\end{enumerate}
+
+Os conjuntos \(\mathrm{FIRST}\) para cada não-terminal são calculados
+iterativamente até atingir um ponto fixo, isto é, até não haver
+modificações no conjunto.
+
+\subsection{Conjunto FOLLOW}
+
+O conjunto \(\mathrm{FOLLOW}(A)\) de um não-terminal \(A\) é o
+conjunto de terminais (e o marcador \(\$\)) que podem aparecer
+imediatamente à direita de \(A\) em alguma forma sentencial:
+
+\[
+  \mathrm{FOLLOW}(A) = \{\, a \in \Sigma \cup \{\$\} \mid S
+  \Rightarrow^* \alpha\, A\, a\, \beta \,\}
+\]
+
+As regras de cálculo são:
+
+\begin{enumerate}
+  \item
+    Se \(A\) é o símbolo inicial: \(\$ \in \mathrm{FOLLOW}(A)\).
+  \item
+    Para cada regra \(B \to \alpha\, A\, \beta\):
+    \begin{itemize}
+      \item
+        Adicionar \(\mathrm{FIRST}(\beta) - \{\lambda\}\) a
+        \(\mathrm{FOLLOW}(A)\).
+      \item
+        Se \(\lambda \in \mathrm{FIRST}(\beta)\), adicionar
+        \(\mathrm{FOLLOW}(B)\) a \(\mathrm{FOLLOW}(A)\).
+    \end{itemize}
+\end{enumerate}
+
+Os conjuntos \(\mathrm{FOLLOW}\) também são calculados iterativamente
+até ponto fixo.
+
+\subsection{Algoritmo para construção da tabela de parsing}
+
+A tabela \(M\) é uma matriz indexada por pares \((A, a)\), onde \(A\)
+é um não-terminal e \(a\) é um terminal ou \(\$\). Cada entrada
+contém uma produção ou indica erro. O algoritmo de construção é:
+\begin{algorithm}
+  \begin{algorithmic}[1]
+    \ForAll{produção $A \to \alpha$ da gramática}
+    \ForAll{terminal $a \in \mathrm{FIRST}(\alpha) - \{\lambda\}$}
+    \State $M[A, a] \gets A \to \alpha$
+    \EndFor
+    \If{$\lambda \in \mathrm{FIRST}(\alpha)$}
+    \ForAll{$b \in \mathrm{FOLLOW}(A)$}
+    \State $M[A, b] \gets A \to \alpha$
+    \EndFor
+    \EndIf
+    \EndFor
+    \State Todas as entradas não preenchidas indicam \textbf{erro}
+  \end{algorithmic}
+  \caption{Construção da tabela de análise preditiva $M$}
+\end{algorithm}
+
+A gramática é \textbf{LL(1)} se e somente se nenhuma entrada da
+tabela receber mais de uma produção. Quando isso ocorre, diz-se que
+há um \textbf{conflito} na tabela.
+
+\section{Algoritmo de Análise Sintática LL(1)}
+
+Com a tabela construída, o algoritmo de parsing é:
+
+\begin{algorithm}
+  \begin{algorithmic}[1]
+    \Require tabela $M$, símbolo inicial $S$, sequência de tokens $w\$$
+    \State pilha $\gets [S,\,\$]$
+    \Loop
+    \State Seja $X$ o topo da pilha e $a$ o símbolo corrente da entrada
+    \If{$X = \$$ e $a = \$$}
+    \State \textbf{aceitar} e parar
+    \ElsIf{$X$ é um terminal}
+    \If{$X = a$}
+    \State Desempilhar $X$ e avançar na entrada
+    \Else
+    \State \textbf{erro}
+    \EndIf
+    \ElsIf{$X$ é um não-terminal}
+    \If{$M[X, a] = X \to \alpha$}
+    \State Substituir $X$ na pilha pelos símbolos de $\alpha$
+    \Statex
+    \hspace{\algorithmicindent}\hspace{\algorithmicindent}\hspace{\algorithmicindent}(empilhados
+    da direita para a esquerda)
+    \Else
+    \State \textbf{erro}
+    \EndIf
+    \EndIf
+    \EndLoop
+  \end{algorithmic}
+  \caption{Analisador sintático preditivo dirigido por tabela}
+\end{algorithm}
+
+A sequência de produções aplicadas corresponde à \textbf{derivação
+mais à esquerda} da entrada.
+
+\section{Exemplo de Construção de Tabela}
+
+\subsection{Gramática LL(1): Expressões Aritméticas}
+
+Retomamos a gramática de expressões apresentada no exemplo informal:
+
+\[
+  \begin{array}{lcl}
+    E  & \to & T\; E' \\
+    E' & \to & +\; T\; E' \mid \lambda \\
+    T  & \to & F\; T' \\
+    T' & \to & *\; F\; T' \mid \lambda \\
+    F  & \to & (\; E\; ) \mid \mathbf{n}
+  \end{array}
+\]
+
+\textbf{Conjuntos FIRST:}
+
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{ll}
+    \toprule
+    Não-terminal & FIRST \\
+    \midrule
+    $E$  & $\{(,\;\mathbf{n}\}$ \\
+      $E'$ & $\{+,\;\lambda\}$ \\
+      $T$  & $\{(,\;\mathbf{n}\}$ \\
+        $T'$ & $\{*,\;\lambda\}$ \\
+        $F$  & $\{(,\;\mathbf{n}\}$ \\
+          \bottomrule
+        \end{tabular}
+        \caption{Conjuntos FIRST}
+      \end{table}
+
+      \textbf{Conjuntos FOLLOW:}
+
+      \begin{table}[ht]
+        \centering
+        \begin{tabular}{ll}
+          \toprule
+          Não-terminal & FOLLOW \\
+          \midrule
+        $E$  & $\{\$,\;)\}$ \\
+      $E'$ & $\{\$,\;)\}$ \\
+    $T$  & $\{+,\;\$,\;)\}$ \\
+  $T'$ & $\{+,\;\$,\;)\}$ \\
+$F$  & $\{*,\;+,\;\$,\;)\}$ \\
+\bottomrule
+\end{tabular}
+\caption{Conjuntos FOLLOW}
+\end{table}
+
+\textbf{Tabela de parsing LL(1):}
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lllllll}
+\toprule
+& $\mathbf{n}$ & $+$ & $*$ & $($ & $)$ & $\$$ \\
+\midrule
+$E$  & $T\;E'$      & $\varnothing$& $\varnothing$         & $T\;E'$      & $\varnothing$
+& $\varnothing$       \\
+$E'$ & $\varnothing$          & $+\;T\;E'$  & $\varnothing$         & $\varnothing$          &
+$\lambda$  & $\lambda$  \\
+$T$  & $F\;T'$      & $\varnothing$         & $\varnothing$         & $F\;T'$      &
+$\varnothing$        & $\varnothing$       \\
+$T'$ & $\varnothing$          & $\lambda$    & $*\;F\;T'$  & $\varnothing$          &
+$\lambda$  & $\lambda$  \\
+$F$  & $\mathbf{n}$ & $\varnothing$         & $\varnothing$         & $(\;E\;)$    &
+$\varnothing$        & $\varnothing$       \\
+\bottomrule
+\end{tabular}
+\caption{Tabela de análise preditiva $M$}
+\end{table}
+
+Cada entrada tem \textbf{no máximo uma produção}, confirmando que a
+gramática é LL(1). A seguir, apresentamos alguns exemplos de
+gramáticas que não são LL(1).
+
+\subsection{Gramática não-LL(1): Conflito FIRST/FIRST}
+
+Considere a gramática para comandos condicionais com o problema do
+\emph{dangling else}:
+
+\[
+\begin{array}{lcl}
+S & \to & \mathbf{if}\; E\; \mathbf{then}\; S\; \mathbf{else}\; S \\
+& \mid & \mathbf{if}\; E\; \mathbf{then}\; S \\
+& \mid & \mathbf{other}
+\end{array}
+\]
+
+Para o não-terminal \(S\) com lookahead \(\mathbf{if}\):
+
+\begin{itemize}
+\item
+\(\mathrm{FIRST}(\mathbf{if}\;E\;\mathbf{then}\;S\;\mathbf{else}\;S)
+= \{\mathbf{if}\}\)
+\item
+\(\mathrm{FIRST}(\mathbf{if}\;E\;\mathbf{then}\;S) = \{\mathbf{if}\}\)
+\end{itemize}
+
+Ambas as produções contribuem para \(M[S, \mathbf{if}]\), gerando um
+\textbf{conflito FIRST/FIRST}. A gramática não é LL(1) porque, com
+apenas um símbolo de lookahead, não é possível distinguir dentre as
+duas alternativas.
+
+\subsection{Gramática não-LL(1): Conflito FIRST/FOLLOW}
+
+Outro tipo comum de conflito ocorre quando uma produção pode derivar
+\(\lambda\) e os conjuntos FIRST e FOLLOW do não-terminal não são
+disjuntos. Considere:
+
+\[
+\begin{array}{lcl}
+S & \to & A\; \mathbf{a} \\
+A & \to & \mathbf{a} \mid \lambda
+\end{array}
+\]
+
+Aqui \(\mathrm{FIRST}(A) = \{\mathbf{a}, \lambda\}\) e
+\(\mathrm{FOLLOW}(A) = \{\mathbf{a}\}\). Para a entrada \(M[A,
+\mathbf{a}]\) devemos registrar tanto \(A \to \mathbf{a}\) (pois
+\(\mathbf{a} \in \mathrm{FIRST}(A)\)) quanto \(A \to \lambda\) (pois
+\(\mathbf{a} \in \mathrm{FOLLOW}(A)\)). Há um \textbf{conflito
+FIRST/FOLLOW} e, portanto, a gramática não é LL(1).
+
+A seguir, vamos discutir a implementação deste algoritmo em Haskell.
+
+\section{A Implementação em Haskell}
+
+A implementação está dividida em três módulos principais:
+\begin{flushleft}
+\verb|Parsing.Grammar|,\\
+\verb|Parsing.LL.BuildTable| e\\
+\verb|Parsing.LL.Parser|.
+\end{flushleft}
+
+\subsection{Representação da Gramática}
+
+Uma gramática é representada como um mapa de não-terminais para
+listas de produções:
+
+\begin{minted}{haskell}
+data Symbol = Terminal String | NonTerminal String
+
+type Production = [Symbol]
+
+type Grammar = Map String [Production]
+\end{minted}
+
+O terminal especial $\lambda$ representa a
+produção vazia. Funções auxiliares como
+\haskell{nonTerminals},
+\haskell{terminals},
+\haskell{isLambda} e
+\haskell{symbolString} facilitam a manipulação
+das estruturas.
+
+\subsection{Conjuntos FIRST (Parsing.First)}
+
+Os conjuntos FIRST são computados por iteração até ponto fixo, usando
+a função \haskell{fixedPoint} do módulo
+\verb|Utils.Fixpoint|:
+
+\begin{minted}{haskell}
+type FirstSet = Map String [String]
+
+computeFirstSets :: Grammar -> FirstSet
+computeFirstSets g = fixedPoint step initial
+  where
+    initial = Map.fromList [(nt, []) | nt <- nonTerminals g]
+    step cur = Map.mapWithKey update cur
+      where
+        update nt _ = unions $ map (firstForSequence g cur)
+                                   (fromMaybe [] (Map.lookup nt g))
+\end{minted}
+
+A função \haskell{firstForSequence} implementa
+diretamente as regras da definição:
+
+\begin{minted}{haskell}
+firstForSequence :: Grammar -> FirstSet -> [Symbol] -> [String]
+firstForSequence _ _ [] = ["λ"]
+firstForSequence g fs (sym:syms)
+    | isTerminal sym =
+        if isLambda sym
+        then firstForSequence g fs syms
+        else [symbolString sym]
+    | otherwise =
+        let nt         = symbolString sym
+            firstOfSym = fromMaybe [] (Map.lookup nt fs)
+            withoutLam = firstOfSym \\ ["λ"]
+        in if "λ" `elem` firstOfSym
+           then withoutLam `union` firstForSequence g fs syms
+           else withoutLam
+\end{minted}
+
+O caso base retorna \haskell{["λ"]} para a sequência
+vazia. Para um terminal, retorna o próprio terminal (ou continua com
+o resto da sequência se for \haskell{λ}. Para um
+não-terminal, inclui seu FIRST sem \haskell{λ} e, se
+ele é anulável, continua com o restante da sequência.
+
+\subsection{Conjuntos FOLLOW (Parsing.Follow)}
+
+Os conjuntos FOLLOW também são calculados por ponto fixo. O símbolo
+inicial começa com \haskell{"$"} em seu conjunto
+FOLLOW, e os demais começam vazios:
+
+\begin{minted}{haskell}
+computeFollowSets :: Grammar -> FirstSet -> FollowSet
+computeFollowSets g fs = fixedPoint step initial
+  where
+    startSymbol = head (nonTerminals g)
+    initial = Map.fromList
+        [ (nt, if nt == startSymbol then ["$"] else [])
+        | nt <- nonTerminals g ]
+    step cur = foldl update cur allProductions
+\end{minted}
+
+Para cada ocorrência de um não-terminal \(B\) numa produção \(A \to
+\alpha\,B\,\beta\), o código calcula \(\mathrm{FIRST}(\beta)\) e
+adiciona à \(\mathrm{FOLLOW}(B)\); se \(\beta\) é anulável, adiciona
+também \(\mathrm{FOLLOW}(A)\):
+
+\begin{minted}{haskell}
+updatePos lhs' follow' pos
+  | NonTerminal b <- prod !! pos =
+      let beta      = drop (pos + 1) prod
+          firstBeta = firstForSequence g fs beta
+          followB   = fromMaybe [] (Map.lookup b follow')
+          newFollow  = followB
+                       `union` (firstBeta \\ ["λ"])
+                       `union` (if "λ" `elem` firstBeta
+                                then fromMaybe [] (Map.lookup lhs' cur)
+                                else [])
+      in Map.insert b newFollow follow'
+  | otherwise = follow'
+\end{minted}
+
+\subsection{Construção da Tabela (Parsing.LL.BuildTable)}
+
+A tabela é um mapa de pares \haskell{(String,String)} para
+\haskell{ParseAction}:
+
+\begin{minted}{haskell}
+type ParseTable = Map (String, String) ParseAction
+
+data ParseAction
+  = Derive Production
+  | Accept
+  | Error
+\end{minted}
+
+A tabela é inicializada com \haskell{Error} em todas
+as entradas \haskell{(nt, t)} para cada par
+(não-terminal, terminal). Em seguida, cada produção preenche as
+entradas correspondentes:
+
+\begin{minted}{haskell}
+buildParseTable :: Grammar -> ParseTable
+buildParseTable g =
+    foldl (addProduction g firstSets followSets) (initialTable g) (allProductions g)
+  where
+    firstSets  = computeFirstSets g
+    followSets = computeFollowSets g firstSets
+\end{minted}
+
+A função \haskell{addProduction} determina os
+terminais para os quais a produção deve ser registrada
+e detecta conflitos:
+
+\begin{minted}{haskell}
+addProduction :: Grammar -> FirstSet -> FollowSet
+              -> ParseTable -> (String, Production) -> ParseTable
+addProduction g firstSets followSets table (lhs, prod) =
+    foldl insertEntry table entries
+  where
+    firstAlpha = firstForSequence g firstSets prod
+    followLhs  = fromMaybe [] (Map.lookup lhs followSets)
+
+    entries :: [String]
+    entries = (firstAlpha \\ ["λ"])
+           ++ if "λ" `elem` firstAlpha then followLhs else []
+
+    insertEntry tbl a =
+      case Map.lookup (lhs, a) tbl of
+        Just Error -> Map.insert (lhs, a) (Derive prod) tbl
+        Just _     -> error $ "Grammar is not LL(1): conflict at ("
+                           ++ lhs ++ ", " ++ a ++ ")"
+        Nothing    -> tbl
+\end{minted}
+
+A lista \haskell{entries} reúne exatamente os
+terminais do algoritmo de construção: \(\mathrm{FIRST}(\alpha)
+\setminus \{\lambda\}\) mais, se \(\alpha\) é anulável,
+\(\mathrm{FOLLOW}(A)\). Se uma entrada já tem uma ação diferente de
+\haskell{Error}, a gramática não é LL(1) e uma
+exceção é lançada imediatamente.
+
+\subsection{O Parser (Parsing.LL.Parser)}
+
+O analisador é uma função pura que recebe a gramática, a tabela e a
+sequência de tokens, e retorna as produções aplicadas ou uma
+mensagem de erro:
+
+\begin{minted}{haskell}
+data ParseResult
+  = ParseOk [Production]
+  | ParseError String
+
+parse :: Grammar -> ParseTable -> [String] -> ParseResult
+parse grammar table tokens =
+    go initialStack (tokens ++ ["$"]) []
+  where
+    startSym     = head (nonTerminals grammar)
+    initialStack = [NonTerminal startSym, Terminal "$"]
+\end{minted}
+
+O loop principal tem quatro casos, correspondendo diretamente ao algoritmo:
+
+\begin{minted}{haskell}
+    go (Terminal "$" : _) ("$" : _) acc =
+        ParseOk (reverse acc)
+
+    go (Terminal t : stack') (a : inp') acc
+        | t == a    = go stack' inp' acc
+        | otherwise = ParseError $
+            "Syntax error: expected '" ++ t ++ "', found '" ++ a ++ "'"
+
+    go (NonTerminal nt : stack') inp@(a : _) acc =
+        case Map.lookup (nt, a) table of
+            Just (Derive prod) ->
+                let pushed = filter (not . isLambda) prod
+                in go (pushed ++ stack') inp (prod : acc)
+            Just Accept ->
+                ParseOk (reverse acc)
+            _ ->
+                ParseError $
+                    "Syntax error: no rule for (" ++ nt ++ ", " ++ a ++ ")"
+
+    go stack' inp' _ =
+        ParseError "Syntax error: unexpected state"
+\end{minted}
+
+Quando uma produção \(\lambda\) é aplicada, os símbolos
+\haskell{λ} são filtrados antes de ser empilhados
+(\haskell{filter (not . isLambda)}), pois \(\lambda\)
+representa a cadeia vazia e não deve ocupar espaço na pilha. O
+acumulador \haskell{acc} coleta as produções em ordem
+reversa; ao aceitar, \haskell{reverse acc} devolve a
+derivação mais à esquerda na ordem correta.
+
+\section{Conclusão}
+
+Neste capítulo, estudamos a análise sintática LL(1) do ponto de vista
+teórico e prático.
+
+Do lado teórico, definimos os conceitos de \textbf{anulável},
+\textbf{FIRST} e \textbf{FOLLOW} e vimos como eles se combinam para
+construir a tabela de parsing preditivo. A tabela encapsula toda a
+decisão do analisador: dado um não-terminal e um símbolo de
+lookahead, ela indica exatamente qual produção aplicar, ou que a
+entrada é inválida.
+
+Do lado prático, a implementação em Haskell mostrou que o algoritmo
+se traduz diretamente em código. Os conjuntos FIRST e FOLLOW são
+calculados por iteração até ponto fixo, a tabela é preenchida com um
+único percurso sobre as produções da gramática, e o parser em si é
+uma função recursiva com três casos simples.
+
+Uma limitação importante da abordagem LL(1) é que nem toda gramática
+livre de contexto pode ser analisada desta forma: gramáticas com
+\textbf{recursão à esquerda} ou que não sejam \textbf{fatoradas à
+esquerda} geram conflitos na tabela. Nesses casos, é necessário
+transformar a gramática ou usar um algoritmo mais poderoso, como
+os analisadores \textbf{LR} que estudaremos nos próximos capítulos.

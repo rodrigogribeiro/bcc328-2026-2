@@ -1,0 +1,846 @@
+\chapter{Transpilação: Geração de Código C}\label{chap:transpilacao}
+
+\section{Introdução}\label{sec:transp-intro}
+
+Ao longo dos capítulos anteriores construímos o \emph{pipeline} clássico de
+compilação: análise léxica e sintática, verificação de tipos, geração de
+representação intermediária e, no capítulo seguinte, tradução para código de
+máquina.  Existe, contudo, uma rota alternativa — amplamente usada na indústria
+— que substitui a geração de código de máquina por uma etapa distinta:
+traduzir o programa para outra \emph{linguagem de alto nível}.  Essa técnica
+chama-se \textbf{transpilação} (ou \emph{source-to-source compilation}).
+
+\subsection{Por que transpilar?}
+
+Um transpilador não produz código de máquina: ele delega essa tarefa ao
+compilador da linguagem-alvo.  Em troca, obtém-se:
+
+\begin{itemize}
+  \item \textbf{Portabilidade imediata.}  Basta que o compilador-alvo exista
+    na plataforma; não é necessário implementar um \emph{backend} por
+    arquitetura.
+  \item \textbf{Otimizações do compilador-alvo.}  O compilador-alvo
+    (e.g.~\texttt{gcc -O2}) aplica análise de fluxo, alocação de
+    registradores e inlining de forma automática.
+  \item \textbf{Simplicidade de implementação.}  Sem IRT, sem alocação de
+    registradores, sem linearização de controle de fluxo.
+  \item \textbf{Código gerado legível.}  O arquivo \texttt{.c} produzido pode
+    ser inspecionado e depurado diretamente.
+\end{itemize}
+
+A contrapartida é que o transpilador não controla a qualidade do código final
+e está sujeito às restrições de expressividade da linguagem-alvo.
+
+\begin{center}
+  \begin{tikzpicture}[
+      node distance=1.0cm and 1.8cm,
+      box/.style={draw, rounded corners, minimum width=2.8cm, minimum
+      height=0.9cm, font=\small\sffamily, align=center},
+      arr/.style={-Stealth, thick}
+    ]
+    \node[box] (ast)  {AST tipada};
+    \node[box, right=of ast]  (c)     {Código C};
+    \node[box, right=of c]    (bin)   {Binário};
+    \draw[arr] (ast) -- (c)   node[midway, above,
+    font=\tiny\sffamily]{transpilador};
+    \draw[arr] (c)   -- (bin) node[midway, above,
+    font=\tiny\sffamily]{\texttt{gcc}};
+  \end{tikzpicture}
+\end{center}
+
+\subsection{TypeScript: um transpilador amplamente utilizado}
+
+O exemplo mais proeminente de transpilador na indústria atual é o
+\textbf{TypeScript}.  TypeScript é uma linguagem de programação desenvolvida
+pela Microsoft que adiciona um \textbf{sistema de tipos estático} ao
+JavaScript.  O compilador \texttt{tsc} recebe arquivos \texttt{.ts} e produz
+arquivos \texttt{.js} válidos, executáveis em qualquer ambiente JavaScript
+— navegadores, Node.js, Deno, etc.
+
+A relevância de TypeScript ilustra vários aspectos importantes da
+transpilação:
+
+\begin{description}
+  \item[Tipos apagados em tempo de execução.]  O código C, Java ou Rust
+    gerado por um compilador carrega informação de tipo em tempo de execução
+    (via RTTI ou layouts de memória tipados).  Em TypeScript, os tipos são
+    \emph{completamente apagados} após a verificação: o \texttt{.js} gerado
+    não contém nenhum rastro das anotações de tipo.  A segurança de tipos
+    existe apenas em tempo de compilação.
+
+  \item[Compatibilidade com a linguagem-alvo.]  TypeScript precisa gerar
+    JavaScript válido para todas as versões-alvo (\texttt{ES5}, \texttt{ES2020},
+    etc.).  Construções modernas como classes, destructuring e async/await são
+    transpiladas para equivalentes mais antigos quando necessário.  Isso impõe
+    restrições: TypeScript não pode gerar código JavaScript que expresse
+    conceitos sem equivalente na linguagem-alvo.
+
+  \item[Escala industrial.]  O compilador \texttt{tsc} é usado por dezenas
+    de milhões de desenvolvedores.  Sua adoção exponencial (de 2012 a hoje)
+    demonstra que a transpilação não é apenas um recurso pedagógico: é uma
+    estratégia de engenharia viável para linguagens de produção.
+
+  \item[Ecosistema de ferramentas.]  Transpiladores podem gerar
+    \emph{source maps} — arquivos que mapeiam posições no código gerado de
+    volta ao código-fonte original — permitindo que depuradores exibam o
+    código TypeScript enquanto executam JavaScript.  Essa técnica é aplicável
+    a qualquer transpilador.
+\end{description}
+
+Outros transpiladores notáveis incluem:
+\begin{itemize}
+  \item \textbf{CoffeeScript $\to$ JavaScript} (2009): precursor de TypeScript,
+    oferecia sintaxe mais concisa.
+  \item \textbf{Kotlin/JS $\to$ JavaScript}: o compilador Kotlin pode
+    transpilar para JavaScript além de JVM bytecode.
+  \item \textbf{Elm $\to$ JavaScript}: linguagem funcional com tipos algébricos
+    transpilada para JavaScript.
+  \item \textbf{Babel}: transpila JavaScript moderno (ES2022+) para JavaScript
+    compatível com navegadores mais antigos.
+  \item \textbf{\texttt{cfront}}: o compilador original de C++ (anos 1980)
+    gerava código C; C++ era inicialmente uma extensão de C.
+  \item \textbf{GHC}: o compilador de Haskell suporta um \emph{backend} C
+    que gera código C portável como passo intermediário.
+\end{itemize}
+
+\subsection{Escopo deste capítulo}
+
+Apresentamos geradores de código C para as três linguagens da disciplina —
+TLine, TWhile e TImp —, em ordem crescente de complexidade.  Cada gerador
+transforma diretamente a AST tipada em um arquivo \texttt{.c} válido que,
+compilado com \texttt{gcc}, produz um executável com a mesma semântica do
+interpretador apresentado nos capítulos anteriores.
+
+% ============================================================================
+\section{C como Linguagem-Alvo}\label{sec:c-target}
+% ============================================================================
+
+C é uma escolha natural para a linguagem-alvo neste contexto.  Seu modelo de
+execução — memória plana, controle de fluxo estruturado, funções com escopo
+local — mapeia-se diretamente às construções de TLine, TWhile e TImp.  A
+biblioteca padrão (\texttt{stdio.h}, \texttt{stdlib.h}, \texttt{string.h})
+provê as funções de I/O e alocação de memória necessárias sem dependências
+externas.
+
+\subsection{Representação de tipos}
+
+A tabela~\ref{tab:tipo-c} resume como cada tipo das linguagens-fonte é
+representado em C.
+
+\begin{table}[htbp]
+  \centering
+  \begin{tabular}{lll}
+    \hline
+    \textbf{Tipo fonte} & \textbf{C (expressão / parâmetro)} &
+    \textbf{C (variável local)} \\
+    \hline
+    \texttt{int}        & \texttt{long}    & \texttt{long v}         \\
+    \texttt{bool}       & \texttt{int}     & \texttt{int v}          \\
+    \texttt{string}     & \texttt{char *}  & \texttt{char v[4096]}   \\
+    \texttt{R} (record) & \texttt{R *}     & \texttt{R *v}           \\
+    \hline
+  \end{tabular}
+  \caption{Mapeamento de tipos para C.}\label{tab:tipo-c}
+\end{table}
+
+A distinção entre ``expressão'' e ``variável local'' para strings existe porque
+parâmetros de função são \texttt{char *} (ponteiro para buffer existente),
+enquanto variáveis locais precisam de um buffer próprio (\texttt{char[4096]})
+para suportar leitura via \texttt{fgets}.  Records são sempre representados
+como ponteiros para structs alocados no heap com \texttt{malloc}.
+
+\subsection{A mônada de geração \texttt{CgM}}
+
+Todos os três transpiladores compartilham a mesma estratégia de
+implementação: uma \textbf{mônada de estado} que acumula linhas de código C
+e mantém o ambiente necessário para as decisões de geração.
+
+\begin{minted}{haskell}
+data CgSt = CgSt
+  { cgLines  :: [String]   -- linhas de código acumuladas
+  , cgEnv    :: Map Var Ty -- tipos das variáveis em escopo
+  , cgIndent :: Int        -- nível de indentação corrente
+  }
+
+type CgM a = StateT CgSt (ExceptT String Identity) a
+\end{minted}
+
+O tipo \texttt{CgM a} combina:
+\begin{itemize}
+  \item \texttt{StateT CgSt}: leitura e atualização do estado de geração;
+  \item \texttt{ExceptT String}: possibilidade de falha com mensagem de erro;
+  \item \texttt{Identity}: sem outros efeitos colaterais.
+\end{itemize}
+
+Duas operações primitivas sustentam toda a geração de código:
+
+\begin{minted}{haskell}
+-- Emite uma linha com o recuo corrente.
+emit :: String -> CgM ()
+emit line = modify $ \s ->
+  s { cgLines = cgLines s ++ [replicate (cgIndent s * 4) ' ' ++ line] }
+
+-- Executa m com um nível extra de indentação.
+indented :: CgM () -> CgM ()
+indented m = do
+  modify $ \s -> s { cgIndent = cgIndent s + 1 }
+  m
+  modify $ \s -> s { cgIndent = cgIndent s - 1 }
+\end{minted}
+
+O ponto de entrada de cada transpilador executa a mônada e coleta as linhas:
+
+\begin{minted}{haskell}
+runCg :: CgM () -> Either String String
+runCg m =
+  case runIdentity (runExceptT (execStateT m initSt)) of
+    Left err -> Left err
+    Right st -> Right (unlines (cgLines st))
+  where
+    initSt = CgSt [] Map.empty 0
+\end{minted}
+
+% ============================================================================
+\section{Geração de Código para TLine}\label{sec:codegen-tline}
+% ============================================================================
+
+TLine é a linguagem mais simples da família: declarações de variáveis,
+atribuições e operações de I/O, sem controle de fluxo.  O programa
+\texttt{TLine} é uma lista de comandos executados sequencialmente em um único
+escopo.
+
+\subsection{Estrutura do código gerado}
+
+Todo programa TLine é traduzido para um único arquivo C com a seguinte
+estrutura:
+
+\begin{minted}{c}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    /* tradução dos comandos */
+    return 0;
+}
+\end{minted}
+
+O ponto de entrada do transpilador reflete exatamente essa estrutura:
+
+\begin{minted}{haskell}
+compileTLine :: TLine -> Either String String
+compileTLine (TLine stmts) = runCg $ do
+  emit "#include <stdio.h>"
+  emit "#include <stdlib.h>"
+  emit "#include <string.h>"
+  blank
+  emit "int main(void) {"
+  indented $ do
+    mapM_ genStmt stmts
+    emit "return 0;"
+  emit "}"
+\end{minted}
+
+\subsection{Geração de expressões}
+
+A função \texttt{genExp} traduz uma expressão da AST para uma string C.
+Ela recebe explicitamente o ambiente de tipos \texttt{env :: Map Var Ty},
+necessário para inferir o tipo de variáveis em comandos de I/O:
+
+\begin{minted}{haskell}
+genExp :: Map Var Ty -> Exp -> String
+genExp _   (EInt n)      = show n ++ "L"
+genExp _   (EBool True)  = "1"
+genExp _   (EBool False) = "0"
+genExp _   (EString s)   = "\"" ++ escapeC s ++ "\""
+genExp _   (EVar v)      = v
+genExp env (e1 :+: e2)   = parens (genExp env e1 ++ " + "  ++ genExp env e2)
+-- demais operadores binários são análogos
+genExp env (Not e)        = "(!" ++ genExp env e ++ ")"
+\end{minted}
+
+Algumas decisões de representação merecem destaque:
+
+\begin{itemize}
+  \item Literais inteiros recebem o sufixo \texttt{L} para forçar o tipo
+    \texttt{long} em C, prevenindo truncamentos em sistemas 32 bits.
+  \item Literais booleanos são mapeados para \texttt{1}/\texttt{0}, pois C
+    não tem tipo booleano nativo.
+  \item Todos os operadores binários são envolvidos por parênteses (função
+    \texttt{parens}), garantindo que a precedência da AST seja preservada
+    independentemente da precedência de C.
+  \item Strings literais passam pela função \texttt{escapeC} que escapa
+    caracteres especiais (\texttt{"}, \texttt{\textbackslash},
+    \texttt{\textbackslash n}).
+\end{itemize}
+
+\paragraph{Regras de tradução de expressões.}
+
+Definindo $\mathcal{E}_\Gamma\llbracket \cdot \rrbracket$ como a função de
+tradução de expressões no ambiente de tipos $\Gamma$:
+
+\begin{Definition}[Tradução de Expressões TLine]\label{def:tline-exp}
+  \begin{align*}
+    \mathcal{E}_\Gamma\llbracket n \rrbracket &= \mathtt{nL} \\
+    \mathcal{E}_\Gamma\llbracket \mathbf{true} \rrbracket &= \mathtt{1} \qquad
+    \mathcal{E}_\Gamma\llbracket \mathbf{false} \rrbracket = \mathtt{0} \\
+    \mathcal{E}_\Gamma\llbracket s \rrbracket &=
+    \mathtt{\textquotedbl}\mathit{escapeC}(s)\mathtt{\textquotedbl} \qquad
+    \mathcal{E}_\Gamma\llbracket x \rrbracket = x \\
+    \mathcal{E}_\Gamma\llbracket e_1 \oplus e_2 \rrbracket
+    &= \mathtt{(}\mathcal{E}_\Gamma\llbracket e_1
+      \rrbracket\ \mathit{opC}(\oplus)\ \mathcal{E}_\Gamma\llbracket
+    e_2 \rrbracket\mathtt{)} \\
+    \mathcal{E}_\Gamma\llbracket \mathbf{not}\ e \rrbracket
+    &= \mathtt{(!}\mathcal{E}_\Gamma\llbracket e \rrbracket\mathtt{)}
+  \end{align*}
+  onde $\mathit{opC}$ mapeia: $+{\mapsto}\mathtt{+}$,
+  $-{\mapsto}\mathtt{-}$, $*{\mapsto}\mathtt{*}$,
+  $/{}\mapsto\mathtt{/}$, $<{\mapsto}\mathtt{<}$,
+  $={\mapsto}\mathtt{==}$.
+\end{Definition}
+
+\subsection{Geração de comandos}
+
+\paragraph{Declaração (\texttt{SDecl v t e}).}
+Para tipos não-string, a tradução é uma declaração com inicializador direto.
+Para strings, é necessária uma declaração de buffer seguida de
+\texttt{strcpy}, pois C não suporta atribuição de arrays com \texttt{=}:
+
+\begin{minted}{haskell}
+genStmt (SDecl v t e) = do
+  env <- gets cgEnv
+  let rhs = genExp env e
+  case t of
+    TString -> do
+      emit (localDecl v TString ++ ";")
+      emit ("strcpy(" ++ v ++ ", " ++ rhs ++ ");")
+    _ ->
+      emit (localDecl v t ++ " = " ++ rhs ++ ";")
+  setVar v t
+\end{minted}
+
+\paragraph{Atribuição (\texttt{SAssign v e}).}
+Análoga à declaração, mas sem o tipo.  O tipo corrente de $v$ é consultado
+em \texttt{cgEnv}:
+
+\begin{minted}{haskell}
+genStmt (SAssign v e) = do
+  env <- gets cgEnv
+  ty  <- getVarTy v
+  let rhs = genExp env e
+  case ty of
+    TString -> emit ("strcpy(" ++ v ++ ", " ++ rhs ++ ");")
+    _       -> emit (v ++ " = " ++ rhs ++ ";")
+\end{minted}
+
+\paragraph{Impressão (\texttt{SPrint e}).}
+O formato de \texttt{printf} é escolhido pelo tipo inferido de $e$.  A função
+auxiliar \texttt{inferTy :: Map Var Ty -> Exp -> Ty} determina o tipo de uma
+expressão consultando \texttt{cgEnv} para variáveis:
+
+\begin{minted}{haskell}
+genStmt (SPrint e) = do
+  env <- gets cgEnv
+  let ce = genExp env e
+  case inferTy env e of
+    TInt    -> emit ("printf(\"%ld\\n\", (long)(" ++ ce ++ "));")
+    TBool   -> emit ("printf(\"%s\\n\", (" ++ ce ++ ") ? \"true\" : \"false\");")
+    TString -> emit ("printf(\"%s\\n\", " ++ ce ++ ");")
+\end{minted}
+
+\paragraph{Leitura (\texttt{SRead prompt v}).}
+O prompt é impresso com \texttt{printf} e o valor é lido com \texttt{scanf}
+(inteiros e booleanos) ou \texttt{fgets} (strings).  Para strings, o
+caractere de nova linha inserido por \texttt{fgets} é removido:
+
+\begin{minted}{haskell}
+genStmt (SRead prompt v) = do
+  env <- gets cgEnv
+  emit ("printf(\"%s\", " ++ genExp env prompt ++ ");")
+  ty <- getVarTy v
+  case ty of
+    TInt    -> emit ("scanf(\"%ld\", &" ++ v ++ ");")
+    TBool   -> emit ("scanf(\"%d\",  &" ++ v ++ ");")
+    TString -> do
+      emit ("fgets(" ++ v ++ ", 4096, stdin);")
+      emit (v ++ "[strcspn(" ++ v ++ ", \"\\n\")] = '\\0';")
+\end{minted}
+
+\paragraph{Regras de tradução de comandos.}
+
+\begin{Definition}[Tradução de Comandos TLine]\label{def:tline-stmt}
+  \begin{align*}
+    \mathcal{S}_\Gamma\llbracket \mathbf{var}\ v : \tau = e \rrbracket
+    &=
+    \begin{cases}
+      \mathtt{char\ }v\mathtt{[4096];\ strcpy(}v\mathtt{,\ }\mathcal{E}_\Gamma\llbracket
+      e\rrbracket\mathtt{);}
+      & \tau = \mathtt{string} \\
+      \mathit{cTy}(\tau)\ v\ \mathtt{=}\ \mathcal{E}_\Gamma\llbracket
+      e\rrbracket\mathtt{;}
+      & \text{c.c.}
+    \end{cases} \\[6pt]
+    \mathcal{S}_\Gamma\llbracket v \mathrel{:=} e \rrbracket
+    &=
+    \begin{cases}
+      \mathtt{strcpy(}v\mathtt{,\ }\mathcal{E}_\Gamma\llbracket
+      e\rrbracket\mathtt{);}
+      & \Gamma(v) = \mathtt{string} \\
+      v\ \mathtt{=}\ \mathcal{E}_\Gamma\llbracket e\rrbracket\mathtt{;}
+      & \text{c.c.}
+    \end{cases} \\[6pt]
+    \mathcal{S}_\Gamma\llbracket \mathbf{print}\ e \rrbracket
+    &=
+    \mathit{printf}_C\bigl(\mathit{ty}_\Gamma(e),\ \mathcal{E}_\Gamma\llbracket
+    e\rrbracket\bigr)
+  \end{align*}
+  onde $\mathit{printf}_C(\mathtt{int},\ c) =
+  \mathtt{printf("\%ld\textbackslash n",\ (long)(}c\mathtt{));}$,
+  $\mathit{printf}_C(\mathtt{bool},\ c) =
+  \mathtt{printf("\%s\textbackslash
+  n",\ (}c\mathtt{)\ ?\ "true"\ :\ "false");}$,
+  $\mathit{printf}_C(\mathtt{string},\ c) =
+  \mathtt{printf("\%s\textbackslash n",\ }c\mathtt{);}$.
+\end{Definition}
+
+\subsection{Exemplo: soma de dois inteiros}
+
+O programa TLine:
+\begin{minted}{text}
+var a : int = 0;
+var b : int = 0;
+read "a: " a;
+read "b: " b;
+print a + b;
+\end{minted}
+
+é transpilado para:
+
+\begin{minted}{c}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    long a = 0L;
+    long b = 0L;
+    printf("%s", "a: ");
+    scanf("%ld", &a);
+    printf("%s", "b: ");
+    scanf("%ld", &b);
+    printf("%ld\n", (long)((a + b)));
+    return 0;
+}
+\end{minted}
+
+% ============================================================================
+\section{Geração de Código para TWhile}\label{sec:codegen-twhile}
+% ============================================================================
+
+TWhile estende TLine com laços \texttt{while}, condicionais
+\texttt{if}/\texttt{else} e operadores booleanos \texttt{\&\&} e \texttt{||}.
+A tradução desses construtores para C é direta, mas exige atenção especial ao
+\textbf{escopo léxico} de variáveis declaradas dentro de blocos.
+
+\subsection{Escopo léxico e \texttt{withBlock}}
+
+Em TWhile (e em C), uma variável declarada dentro de um bloco \texttt{while}
+ou \texttt{if} não é visível fora dele.  O código C gerado já respeita esse
+escopo por meio das chaves \texttt{\{ \}}.  Entretanto, o ambiente de tipos
+\texttt{cgEnv} é um estado global da mônada; sem um mecanismo de restauração,
+variáveis declaradas dentro de um bloco ``vazariam'' para o ambiente de
+geração das instruções subsequentes, prejudicando \texttt{inferTy} e
+\texttt{getVarTy}.
+
+A função \texttt{withBlock} soluciona isso salvando e restaurando
+\texttt{cgEnv} ao redor da geração de cada bloco:
+
+\begin{minted}{haskell}
+withBlock :: CgM () -> CgM ()
+withBlock m = do
+  saved <- gets cgEnv
+  m
+  modify $ \s -> s { cgEnv = saved }
+\end{minted}
+
+\subsection{Geração de \texttt{while} e \texttt{if}/\texttt{else}}
+
+\begin{minted}{haskell}
+genStmt (SWhile e body) = do
+  env <- gets cgEnv
+  emit ("while (" ++ genExp env e ++ ") {")
+  withBlock $ indented (mapM_ genStmt body)
+  emit "}"
+
+genStmt (SIf e b1 b2) = do
+  env <- gets cgEnv
+  emit ("if (" ++ genExp env e ++ ") {")
+  withBlock $ indented (mapM_ genStmt b1)
+  emit "} else {"
+  withBlock $ indented (mapM_ genStmt b2)
+  emit "}"
+\end{minted}
+
+Cada ramo é gerado em um \texttt{withBlock} independente: variáveis declaradas
+no \texttt{then} não aparecem no ambiente durante a geração do \texttt{else}.
+
+\begin{Definition}[Novos comandos de TWhile]\label{def:twhile-stmt}
+  \begin{align*}
+    \mathcal{S}_\Gamma\llbracket \mathbf{while}\ e\ \{\ \vec{s}\ \} \rrbracket
+    &= \texttt{while (}\mathcal{E}_\Gamma\llbracket e \rrbracket\texttt{) \{}\
+      \mathcal{S}_{\Gamma'}\llbracket \vec{s} \rrbracket\
+    \texttt{\}} \\
+    \mathcal{S}_\Gamma\llbracket
+    \mathbf{if}\ e\ \{\ \vec{s}_1\ \}\ \mathbf{else}\ \{\ \vec{s}_2\ \}
+    \rrbracket
+    &= \texttt{if (}\mathcal{E}_\Gamma\llbracket e
+      \rrbracket\texttt{) \{}\ \mathcal{S}_{\Gamma'}\llbracket
+      \vec{s}_1 \rrbracket\ \texttt{\} else
+    \{}\ \mathcal{S}_{\Gamma''}\llbracket \vec{s}_2 \rrbracket\ \texttt{\}}
+  \end{align*}
+  onde $\Gamma'$ e $\Gamma''$ são os ambientes estendidos com as declarações de
+  cada bloco, restritos ao escopo do respectivo bloco.
+\end{Definition}
+
+\subsection{Exemplo: fatorial iterativo}
+
+O programa TWhile:
+\begin{minted}{text}
+var n : int = 5;
+var acc : int = 1;
+while n > 0 {
+    acc := acc * n;
+    n := n - 1;
+}
+print acc;
+\end{minted}
+
+gera:
+
+\begin{minted}{c}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    long n = 5L;
+    long acc = 1L;
+    while ((n > 0L)) {
+        acc = (acc * n);
+        n = (n - 1L);
+    }
+    printf("%ld\n", (long)(acc));
+    return 0;
+}
+\end{minted}
+
+% ============================================================================
+\section{Geração de Código para TImp}\label{sec:codegen-timp}
+% ============================================================================
+
+TImp é a linguagem mais rica da família: acrescenta \textbf{tipos registro},
+\textbf{funções de usuário} com recursão mútua e as expressões \texttt{new},
+\texttt{e.f} e \texttt{f(args)}.  A geração de código para TImp exige três
+estratégias adicionais:
+
+\begin{enumerate}
+  \item Registros são mapeados para \texttt{struct}s C, com uma função
+    auxiliar \texttt{make\_R} por tipo para alocação e inicialização.
+  \item Funções de usuário são geradas com \emph{forward declarations}
+    para suportar recursão mútua.
+  \item O estado da mônada é estendido com dois ambientes adicionais:
+    campos dos registros (\texttt{cgRecEnv}) e tipos de retorno das funções
+    (\texttt{cgFnEnv}).
+\end{enumerate}
+
+\subsection{Estado estendido}
+
+\begin{minted}{haskell}
+data CgSt = CgSt
+  { cgLines  :: [String]
+  , cgIndent :: Int
+  , cgEnv    :: Map Var Ty           -- variáveis locais em escopo
+  , cgRecEnv :: Map Name [FieldDecl] -- campos de cada record
+  , cgFnEnv  :: Map Name RetTy       -- tipo de retorno de cada função
+  }
+\end{minted}
+
+\texttt{cgRecEnv} é necessário para gerar \texttt{ENew} na ordem dos campos
+da declaração e para realizar \texttt{inferTy} em \texttt{EField}.
+\texttt{cgFnEnv} é necessário para \texttt{inferTy} em chamadas de função
+usadas dentro de \texttt{print}.
+
+\subsection{Records: structs e funções construtoras}
+
+Cada declaração \texttt{record R \{ $f_1$ : $\tau_1$; \ldots \}} gera duas
+construções C:
+
+\paragraph{1.\ Typedef struct.}
+
+\begin{minted}{c}
+typedef struct {
+    long f1;
+    /* demais campos */
+} R;
+\end{minted}
+
+\begin{minted}{haskell}
+genRecordTypedef :: RecordDecl -> CgM ()
+genRecordTypedef (RecordDecl rname fields) = do
+  emit "typedef struct {"
+  indented $ mapM_ (\(FieldDecl f t) -> emit (cTy t ++ " " ++ f ++ ";")) fields
+  emit ("} " ++ rname ++ ";")
+\end{minted}
+
+\paragraph{2.\ Função construtora \texttt{make\_R}.}
+
+A expressão \texttt{new R \{ \ldots \}} precisa ser compilada como uma
+\emph{expressão} C — sem statements auxiliares — porque pode aparecer em
+posição de argumento ou de inicializador.  A solução é gerar uma função
+auxiliar que aloca o struct via \texttt{malloc} e o inicializa com os valores
+dos campos:
+
+\begin{minted}{c}
+R* make_R(long f1, ...) {
+    R* _r = (R*)malloc(sizeof(R));
+    _r->f1 = f1;
+    /* demais campos */
+    return _r;
+}
+\end{minted}
+
+Com isso, \texttt{new R \{ $f_1$ = $e_1$, \ldots \}} compila para
+\texttt{make\_R($\mathcal{E}\llbracket e_1 \rrbracket$, \ldots)}, uma chamada
+de função pura sem extensões de compilador.
+
+\begin{minted}{haskell}
+genMakeHelper :: RecordDecl -> CgM ()
+genMakeHelper (RecordDecl rname fields) = do
+  let params = commas [cTy t ++ " " ++ f | FieldDecl f t <- fields]
+  emit (rname ++ "* make_" ++ rname ++ "(" ++ params ++ ") {")
+  indented $ do
+    emit (rname ++ "* _r = (" ++ rname ++ "*)malloc(sizeof(" ++ rname ++ "));")
+    mapM_ (\(FieldDecl f _) -> emit ("_r->" ++ f ++ " = " ++ f ++ ";")) fields
+    emit "return _r;"
+  emit "}"
+\end{minted}
+
+\subsection{Geração de expressões (monádica)}
+
+Em TImp, a geração de expressões é \emph{monádica} (retorna \texttt{CgM
+String}) porque consulta \texttt{cgRecEnv} e \texttt{cgFnEnv}:
+
+\begin{minted}{haskell}
+genExp :: Exp -> CgM String
+genExp (EField (EVar v) f) = pure (v ++ "->" ++ f)
+genExp (EField e f) = do
+  ce <- genExp e
+  pure (parens ce ++ "->" ++ f)
+genExp (ECall fname args) = do
+  cArgs <- mapM genExp args
+  pure (fname ++ "(" ++ commas cArgs ++ ")")
+genExp (ENew rname initFields) = do
+  recEnv <- gets cgRecEnv
+  case Map.lookup rname recEnv of
+    Nothing   -> throwError ("Tipo record desconhecido: " ++ rname)
+    Just flds -> do
+      args  <- mapM (lookupField initFields rname) flds
+      cArgs <- mapM genExp args
+      pure ("make_" ++ rname ++ "(" ++ commas cArgs ++ ")")
+\end{minted}
+
+A tradução de \texttt{ENew} percorre os campos na \emph{ordem da declaração},
+garantindo que a assinatura de \texttt{make\_R} seja sempre respeitada.
+
+\begin{Definition}[Expressões adicionais de TImp]\label{def:timp-exp}
+  \begin{align*}
+    \mathcal{E}\llbracket x.f \rrbracket
+    &= x \texttt{->} f \\
+    \mathcal{E}\llbracket e.f \rrbracket
+    &= \texttt{(}\mathcal{E}\llbracket e\rrbracket\texttt{)->}f \\
+    \mathcal{E}\llbracket f(\vec{e}) \rrbracket
+    &= f\texttt{(}\mathcal{E}\llbracket
+      e_1\rrbracket\texttt{,\ \ldots,\ }\mathcal{E}\llbracket
+    e_n\rrbracket\texttt{)} \\
+    \mathcal{E}\llbracket \mathbf{new}\ R\ \{\ f_1 = e_1,\ \ldots\ \} \rrbracket
+    &= \texttt{make\_}R\texttt{(}\mathcal{E}\llbracket
+    e_{\sigma(1)}\rrbracket\texttt{,\ \ldots)}
+  \end{align*}
+  onde $\sigma$ reordena os campos conforme a declaração de $R$.
+\end{Definition}
+
+\subsection{Comandos adicionais de TImp}
+
+\begin{minted}{haskell}
+genStmt (SFieldAssign v f e) = do
+  ce <- genExp e
+  emit (v ++ "->" ++ f ++ " = " ++ ce ++ ";")
+
+genStmt (SReturn Nothing)  = emit "return;"
+genStmt (SReturn (Just e)) = do { ce <- genExp e; emit ("return " ++ ce ++ ";") }
+
+genStmt (SCall fname args) = do
+  cArgs <- mapM genExp args
+  emit (fname ++ "(" ++ commas cArgs ++ ");")
+\end{minted}
+
+\begin{Definition}[Comandos adicionais de TImp]\label{def:timp-stmt}
+  \begin{align*}
+    \mathcal{S}\llbracket v.f \mathrel{:=} e \rrbracket
+    &= v\texttt{->}f\ \texttt{=}\ \mathcal{E}\llbracket e\rrbracket\texttt{;} \\
+    \mathcal{S}\llbracket \mathbf{return}\ e \rrbracket
+    &= \texttt{return}\ \mathcal{E}\llbracket e\rrbracket\texttt{;} \qquad
+    \mathcal{S}\llbracket \mathbf{return} \rrbracket = \texttt{return;} \\
+    \mathcal{S}\llbracket f(\vec{e}) \rrbracket
+    &= f\texttt{(}\mathcal{E}\llbracket \vec{e}\rrbracket\texttt{);}
+  \end{align*}
+\end{Definition}
+
+\subsection{Funções de usuário e forward declarations}
+
+TImp permite funções mutuamente recursivas.  Em C, uma função só pode ser
+chamada após sua declaração.  A solução é emitir \textbf{declarações avançadas}
+de todas as funções antes de suas definições:
+
+\begin{minted}{haskell}
+funcSignature :: FuncDecl -> String
+funcSignature (FuncDecl fname params retTy _) =
+  cRetTy retTy ++ " " ++ fname ++ "(" ++ paramList ++ ")"
+  where
+    paramList | null params = "void"
+              | otherwise   = commas [cParamTy t ++ " " ++ v | Param v t <- params]
+
+genForwardDecl :: FuncDecl -> CgM ()
+genForwardDecl fd = emit (funcSignature fd ++ ";")
+
+genFuncDef :: FuncDecl -> CgM ()
+genFuncDef fd@(FuncDecl _ params _ body) = do
+  emit (funcSignature fd ++ " {")
+  withBlock $ indented $ do
+    mapM_ (\(Param v t) -> setVar v t) params
+    mapM_ genStmt body
+  emit "}"
+\end{minted}
+
+O corpo da função é gerado dentro de \texttt{withBlock}, de modo que os
+parâmetros e variáveis locais não poluem o ambiente global após o retorno.
+
+\subsection{Estrutura do código gerado para TImp}
+
+O ponto de entrada \texttt{compileTImp} orquestra a geração na seguinte
+ordem, respeitando as dependências de declaração do C:
+
+\begin{enumerate}
+  \item Cabeçalhos (\texttt{\#include}).
+  \item \texttt{typedef struct \{ \ldots \} R;} para cada record.
+  \item Funções \texttt{make\_R(\ldots)} para cada record.
+  \item Forward declarations de todas as funções de usuário.
+  \item Definições completas de todas as funções de usuário.
+  \item \texttt{int main(void) \{ \ldots \}} com os comandos de topo
+    do programa.
+\end{enumerate}
+
+\subsection{Exemplo: registros com funções}
+
+O programa TImp:
+\begin{minted}{text}
+record Point { x : int; y : int; }
+
+fn distance(p: Point): int {
+    return p.x * p.x + p.y * p.y;
+}
+
+var p : Point = new Point { x = 3, y = 4 };
+print distance(p);
+\end{minted}
+
+gera:
+
+\begin{minted}{c}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    long x;
+    long y;
+} Point;
+
+Point* make_Point(long x, long y) {
+    Point* _r = (Point*)malloc(sizeof(Point));
+    _r->x = x;
+    _r->y = y;
+    return _r;
+}
+
+long distance(Point * p);
+
+long distance(Point * p) {
+    return ((p->x * p->x) + (p->y * p->y));
+}
+
+int main(void) {
+    Point *p = make_Point(3L, 4L);
+    printf("%ld\n", (long)(distance(p)));
+    return 0;
+}
+\end{minted}
+
+Compilado e executado, o programa imprime \texttt{25} ($3^2 + 4^2 = 25$).
+
+% ============================================================================
+\section{Uso do Transpilador}\label{sec:transp-uso}
+% ============================================================================
+
+Os três transpiladores são acessíveis via a opção \texttt{--c}:
+
+\begin{minted}{bash}
+$ cabal run tline  -- --c -f prog.tline   # gera prog.c
+$ cabal run twhile -- --c -f prog.twhile  # gera prog.c
+$ cabal run timp   -- --c -f prog.timp    # gera prog.c
+\end{minted}
+
+O arquivo \texttt{.c} gerado pode então ser compilado com qualquer compilador
+C compatível com C99:
+
+\begin{minted}{bash}
+$ gcc -O2 -o prog prog.c
+$ ./prog
+\end{minted}
+
+% ============================================================================
+\section{Conclusão}\label{sec:transp-conclusao}
+% ============================================================================
+
+Este capítulo apresentou o projeto e a implementação de transpiladores de
+TLine, TWhile e TImp para C.
+
+Os pontos principais foram:
+
+\begin{itemize}
+  \item A \textbf{transpilação} é uma estratégia amplamente utilizada na
+    indústria — TypeScript, CoffeeScript, Kotlin/JS, Babel e o \texttt{cfront}
+    original do C++ são todos transpiladores — que delega a geração de código
+    de máquina a um compilador da linguagem-alvo.
+
+  \item O \textbf{mapeamento de tipos} exige decisões concretas: inteiros como
+    \texttt{long}, booleanos como \texttt{int}, strings como buffers fixos
+    \texttt{char[4096]} locais ou \texttt{char *} em parâmetros, e records como
+    ponteiros para structs alocados via \texttt{malloc}.
+
+  \item A \textbf{mônada de geração} \texttt{CgM} combina estado acumulador
+    com possibilidade de falha, e é estendida progressivamente de TLine (estado
+    mínimo) a TImp (com \texttt{cgRecEnv} e \texttt{cgFnEnv} adicionais).
+
+  \item O padrão \textbf{\texttt{withBlock}} garante que o ambiente de tipos
+    reflita o escopo léxico correto durante a geração, evitando que variáveis
+    de blocos internos poluam o ambiente global.
+
+  \item As \textbf{funções construtoras \texttt{make\_R}} permitem que
+    \texttt{new R \{ \ldots \}} seja compilado para uma expressão C pura,
+    sem extensões de compilador.
+
+  \item As \textbf{forward declarations} de todas as funções habilitam
+    recursão mútua sem exigir ordem específica de definição.
+\end{itemize}

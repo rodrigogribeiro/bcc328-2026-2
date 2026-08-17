@@ -1,0 +1,13 @@
+func max(a, b) {
+  SEQ(CJUMP(BINOP(GEQ, TEMP(a), TEMP(b)), then_0, else_1),
+      SEQ(LABEL(then_0),
+          SEQ(RETURN(TEMP(a)),
+              SEQ(LABEL(else_1),
+                  SEQ(RETURN(TEMP(b)),
+                      LABEL(end_2))))))
+}
+func main() {
+  SEQ(EXP(CALL(NAME(print), CALL(NAME(max), CONST(10), CONST(7)))),
+      SEQ(EXP(CALL(NAME(print), CALL(NAME(max), CONST(3),  CONST(9)))),
+          RETURN()))
+}

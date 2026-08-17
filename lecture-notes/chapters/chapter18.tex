@@ -1,0 +1,1297 @@
+\chapter{Otimizações de Código Intermediário}
+
+\section{Introdução}
+
+A representação intermediária em árvore (IRT) introduzida no capítulo anterior
+não é apenas um formato de saída do \emph{front-end}: ela é o substrato sobre o
+qual o compilador aplica transformações que melhoram a qualidade do código sem
+alterar seu significado observável.  Essas transformações são denominadas
+\textbf{otimizações}.
+
+O termo ``otimização'' é, na prática, um exagero: raramente se garante que o
+código produzido é \emph{ótimo} segundo alguma métrica global.  O que se busca
+é código \emph{melhor}, ou seja, mais rápido, menor ou mais econômico
+em memória,
+do que o código gerado diretamente sem nenhuma transformação.
+
+Este capítulo apresenta formalmente dez otimizações aplicadas à IRT
+definida no capítulo anterior e, em seguida, descreve a implementação em Haskell
+de cada uma delas.
+
+\subsection*{Classificação das Otimizações}
+
+As otimizações são usualmente classificadas pelo escopo de análise:
+
+\begin{description}
+  \item[Locais (intra-bloco).] Aplicadas dentro de um único bloco básico, sem
+    cruzar desvios condicionais ou rótulos.  São as mais simples e eficientes de
+    implementar.  Exemplos: dobramento de constantes, eliminação de
+    subexpressões comuns.
+  \item[Globais (inter-bloco).] Requerem análise de fluxo de controle entre
+    blocos.  Exemplo: propagação de constantes globais, eliminação de código
+    morto.
+  \item[De laço.] Exploram a estrutura iterativa dos programas.  Exemplos:
+    movimentação de código invariante, desenrolamento, fusão de laços.
+\end{description}
+
+As sete otimizações cobertas neste capítulo são:
+
+\begin{enumerate}
+  \item \textbf{Dobramento de constantes} (\emph{constant folding})
+  \item \textbf{Propagação de constantes} (\emph{constant propagation})
+  \item \textbf{Dobramento e propagação combinados}
+  \item \textbf{Eliminação de subexpressões comuns} (CSE)
+  \item \textbf{Eliminação de código morto} (DCE)
+  \item \textbf{Movimentação de código invariante de laço} (LICM)
+  \item \textbf{Desenrolamento de laço} (\emph{loop unrolling})
+  \item \textbf{Fusão de laços} (\emph{loop fusion})
+  \item \textbf{Inlining de funções} (\emph{function inlining})
+  \item \textbf{Eliminação de chamadas em cauda} (\emph{tail-call elimination})
+\end{enumerate}
+
+\subsection*{Terminologia}
+
+Ao longo deste capítulo usamos a seguinte terminologia:
+
+\begin{itemize}
+  \item Uma expressão é \textbf{pura} se sua avaliação não produz efeitos
+    colaterais: $e$ é pura se $e \in \{\mathbf{CONST}, \mathbf{TEMP},
+    \mathbf{NAME}\}$ ou se $e = \mathbf{BINOP}(\mathit{op}, e_1, e_2)$ com
+    $e_1$ e $e_2$ puras.  $\mathbf{MEM}$, $\mathbf{CALL}$ e $\mathbf{ESEQ}$
+    não são puras.
+  \item $\mathit{freeTemps}(e)$ denota o conjunto de temporários que ocorrem
+    livres em $e$.
+  \item $\mathit{defs}(s)$ denota o conjunto de temporários \emph{definidos}
+    (escritos) pelo comando $s$.
+  \item $\mathit{uses}(s)$ denota o conjunto de temporários \emph{usados}
+    (lidos) pelo comando $s$.
+\end{itemize}
+
+% ============================================================================
+\section{Dobramento de Constantes}\label{sec:opt-fold}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+O \textbf{dobramento de constantes} (\emph{constant folding}) é a avaliação
+em tempo de compilação de operações cujos operandos já são conhecidos como
+constantes.
+
+\begin{Definition}[Dobramento de Constantes]\label{def:const-fold}
+  A função $\mathit{fold} : \mathit{Expr} \to \mathit{Expr}$ é definida
+  indutivamente por:
+  \begin{align*}
+    \mathit{fold}(\mathbf{CONST}(n)) &= \mathbf{CONST}(n) \\
+    \mathit{fold}(\mathbf{TEMP}(t))  &= \mathbf{TEMP}(t) \\
+    \mathit{fold}(\mathbf{BINOP}(\mathit{op}, e_1, e_2)) &=
+    \begin{cases}
+      \mathbf{CONST}(\mathit{op}(n_1, n_2))
+      & \text{se } \mathit{fold}(e_1) = \mathbf{CONST}(n_1)
+      \text{ e } \mathit{fold}(e_2) = \mathbf{CONST}(n_2) \\
+      & \quad \text{e } (\mathit{op} \notin \{\mathtt{DIV},\mathtt{MOD}\}
+      \text{ ou } n_2 \neq 0) \\
+      \mathit{simplify}(\mathit{op}, e_1', e_2')
+      & \text{caso contrário}
+    \end{cases}
+  \end{align*}
+  onde $e_i' = \mathit{fold}(e_i)$.  A função $\mathit{simplify}$ aplica
+  identidades algébricas:
+  \begin{align*}
+    \mathit{simplify}(\mathtt{ADD}, e, \mathbf{CONST}(0))     &= e \\
+    \mathit{simplify}(\mathtt{ADD}, \mathbf{CONST}(0), e)     &= e \\
+    \mathit{simplify}(\mathtt{SUB}, e, \mathbf{CONST}(0))     &= e \\
+    \mathit{simplify}(\mathtt{MUL}, \_, \mathbf{CONST}(0))    &=
+    \mathbf{CONST}(0) \\
+    \mathit{simplify}(\mathtt{MUL}, e, \mathbf{CONST}(1))     &= e \\
+    \mathit{simplify}(\mathtt{DIV}, e, \mathbf{CONST}(1))     &= e \\
+    \mathit{simplify}(\mathtt{AND}, \_, \mathbf{CONST}(0))    &=
+    \mathbf{CONST}(0) \\
+    \mathit{simplify}(\mathtt{OR},  e, \mathbf{CONST}(0))     &= e \\
+    \mathit{simplify}(\mathit{op}, e_1, e_2)                  &=
+    \mathbf{BINOP}(\mathit{op}, e_1, e_2)
+  \end{align*}
+\end{Definition}
+
+\begin{remark}
+  A guarda $n_2 \neq 0$ para $\mathtt{DIV}$ e $\mathtt{MOD}$ evita avaliação
+  de divisão por zero em tempo de compilação, preservando o comportamento de
+  erro do programa em tempo de execução.
+\end{remark}
+
+\begin{example}
+  A expressão $\mathbf{BINOP}(\mathtt{ADD},\; \mathbf{CONST}(3),\;
+  \mathbf{BINOP}(\mathtt{MUL},\; \mathbf{CONST}(2),\; \mathbf{CONST}(5)))$
+  é dobrada em:
+  \[
+    \mathit{fold}(\cdots) \;=\; \mathbf{CONST}(13)
+  \]
+  E $\mathbf{BINOP}(\mathtt{MUL},\; \mathbf{TEMP}(x),\; \mathbf{CONST}(0))$
+  é simplificada para $\mathbf{CONST}(0)$ pela identidade algébrica, sem
+  necessidade de conhecer o valor de $x$.
+\end{example}
+
+\subsection{Correção}
+
+A correção do dobramento é garantida pelo seguinte critério: para todo estado
+$\sigma$ e expressão $e$,
+\[
+  \sigma \vdash e \Downarrow v \;\iff\; \sigma \vdash
+  \mathit{fold}(e) \Downarrow v.
+\]
+A demonstração é uma indução estrutural sobre $e$: os casos base
+($\mathbf{CONST}$,
+$\mathbf{TEMP}$) são triviais; o caso $\mathbf{BINOP}$ segue da correção de
+$\mathit{op}(n_1, n_2)$ e das identidades algébricas (que valem em
+$\mathbb{Z}$).
+
+% ============================================================================
+\section{Propagação de Constantes}\label{sec:opt-prop}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+O \textbf{dobramento e propagação combinados} realiza, em uma única passagem
+ascendente, tanto a substituição de temporários com valores constantemente
+conhecidos quanto o dobramento das subexpressões resultantes.
+
+\begin{Definition}[Ambiente de Propagação]\label{def:prop-env}
+  Um \textbf{ambiente de propagação} é uma função parcial
+  $\rho : \mathit{Temp} \rightharpoonup \mathbb{Z}$
+  que associa a cada temporário (possivelmente) seu valor constante corrente.
+\end{Definition}
+
+\begin{Definition}[Propagação Combinada de Expressões]\label{def:fold-prop-expr}
+  A função $\mathit{foldProp}_\rho : \mathit{Expr} \to \mathit{Expr}$, para um
+  ambiente $\rho$, é definida por:
+  \begin{align*}
+    \mathit{foldProp}_\rho(\mathbf{TEMP}(t)) &=
+    \begin{cases}
+      \mathbf{CONST}(\rho(t)) & \text{se } t \in \mathit{dom}(\rho) \\
+      \mathbf{TEMP}(t)        & \text{caso contrário}
+    \end{cases} \\[4pt]
+    \mathit{foldProp}_\rho(\mathbf{BINOP}(\mathit{op}, e_1, e_2)) &=
+    \mathit{simplify}\!\left(\mathit{op},\; e_1',\; e_2'\right)
+    \quad \text{onde } e_i' = \mathit{foldProp}_\rho(e_i)
+  \end{align*}
+  (com dobramento imediato quando $e_1', e_2'$ são ambas $\mathbf{CONST}$,
+  como na Definição~\ref{def:const-fold}).
+\end{Definition}
+
+\begin{Definition}[Propagação de Comandos]\label{def:fold-prop-stmt}
+  A função $\mathit{foldPropStmt}$ transforma um comando e atualiza o ambiente:
+  \begin{align*}
+    \mathit{foldPropStmt}_\rho(\mathbf{SEQ}(s_1, s_2))
+    &= \mathbf{SEQ}(s_1',\, s_2'),\; \rho''
+    \\
+    &\quad \text{onde } (s_1',\, \rho') = \mathit{foldPropStmt}_\rho(s_1)
+    \\
+    &\quad\quad\quad\quad\; (s_2',\, \rho'') =
+    \mathit{foldPropStmt}_{\rho'}(s_2)
+    \\[6pt]
+    \mathit{foldPropStmt}_\rho(\mathbf{MOVE}(\mathbf{TEMP}(t), e))
+    &= \mathbf{MOVE}(\mathbf{TEMP}(t), e'),\; \rho'
+    \\
+    &\quad \text{onde } e' = \mathit{foldProp}_\rho(e)
+    \\
+    &\quad\quad\quad\quad\; \rho' =
+    \begin{cases}
+      \rho[t \mapsto n] & \text{se } e' = \mathbf{CONST}(n) \\
+      \rho \setminus \{t\} & \text{caso contrário}
+    \end{cases}
+  \end{align*}
+  Para todos os outros comandos, os ambientes são propagados
+  inalterados: $\rho' = \rho$.
+\end{Definition}
+
+\begin{example}
+  Consideremos a sequência:
+  \begin{minted}{text}
+  MOVE(TEMP(x), CONST(5))
+  MOVE(TEMP(y), BINOP(MUL, TEMP(x), CONST(2)))
+  RETURN(TEMP(y))
+  \end{minted}
+  Com $\rho = \emptyset$ inicialmente:
+  \begin{enumerate}
+    \item Após o primeiro \textbf{MOVE}: $\rho = \{x \mapsto 5\}$.
+    \item O segundo \textbf{MOVE} processa
+      $\mathbf{BINOP}(\mathtt{MUL}, \mathbf{TEMP}(x), \mathbf{CONST}(2))$;
+      $\mathbf{TEMP}(x)$ é substituído por $\mathbf{CONST}(5)$, e a
+      multiplicação
+      é dobrada para $\mathbf{CONST}(10)$. $\rho = \{x \mapsto 5, y
+      \mapsto 10\}$.
+    \item O \textbf{RETURN} propaga: $\mathbf{TEMP}(y) \to \mathbf{CONST}(10)$.
+  \end{enumerate}
+  O resultado é:
+  \begin{minted}{text}
+  MOVE(TEMP(x), CONST(5))
+  MOVE(TEMP(y), CONST(10))
+  RETURN(CONST(10))
+  \end{minted}
+\end{example}
+
+% ============================================================================
+\section{Eliminação de Subexpressões Comuns}\label{sec:opt-cse}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+A \textbf{eliminação de subexpressões comuns} (CSE, \emph{Common Subexpression
+Elimination}) evita o recomputo de uma expressão pura cujo valor já está
+disponível em um temporário.
+
+\begin{Definition}[Tabela CSE]\label{def:cse-table}
+  Uma \textbf{tabela CSE} é uma função parcial
+  $\theta : \mathit{PureExpr} \rightharpoonup \mathit{Temp}$
+  que mapeia cada expressão pura não-trivial ao temporário que contém seu valor
+  mais recentemente calculado.
+  A tabela é válida dentro de um \emph{bloco básico}: ela é reiniciada a cada
+  fronteira de bloco ($\mathbf{LABEL}$, $\mathbf{JUMP}$, $\mathbf{CJUMP}$,
+  $\mathbf{RETURN}$).
+\end{Definition}
+
+\begin{Definition}[Transformação CSE]\label{def:cse-transform}
+  Para cada instrução $\mathbf{MOVE}(\mathbf{TEMP}(t), e)$ onde $e$ é pura e
+  não-trivial:
+  \[
+    \mathit{CSE}_\theta(\mathbf{MOVE}(\mathbf{TEMP}(t), e)) =
+    \begin{cases}
+      \mathbf{MOVE}(\mathbf{TEMP}(t), \mathbf{TEMP}(\theta(e)))
+      & \text{se } e \in \mathit{dom}(\theta) \\[4pt]
+      \begin{array}{l}
+        \mathbf{MOVE}(\mathbf{TEMP}(c), e) \\
+        \mathbf{MOVE}(\mathbf{TEMP}(t), \mathbf{TEMP}(c))
+      \end{array}
+      & \text{caso contrário}
+    \end{cases}
+  \]
+  No segundo caso, $c$ é um novo temporário introduzido pelo compilador, e
+  $\theta$ é atualizado com $\theta' = \theta[e \mapsto c]$.
+  Em ambos os casos, todas as entradas de $\theta$ que mencionam $t$ são
+  removidas (pois $t$ acaba de ser redefinido).
+\end{Definition}
+
+\begin{remark}
+  A restrição a expressões \emph{puras} é essencial: $\mathbf{MEM}(e)$ pode
+  produzir valores diferentes após uma escrita em memória, e $\mathbf{CALL}$
+  pode ter efeitos colaterais.  A restrição ao escopo \emph{intra-bloco}
+  evita problemas com caminhos alternativos que podem não executar o cálculo
+  original.
+\end{remark}
+
+\begin{example}
+  A sequência:
+  \begin{minted}{text}
+  MOVE(TEMP(a), BINOP(ADD, TEMP(x), TEMP(y)))
+  MOVE(TEMP(b), BINOP(ADD, TEMP(x), TEMP(y)))
+  \end{minted}
+  é transformada em:
+  \begin{minted}{text}
+  MOVE(TEMP(_cse0), BINOP(ADD, TEMP(x), TEMP(y)))
+  MOVE(TEMP(a),     TEMP(_cse0))
+  MOVE(TEMP(b),     TEMP(_cse0))
+  \end{minted}
+  A expressão $\mathbf{BINOP}(\mathtt{ADD}, x, y)$ é calculada uma única vez.
+\end{example}
+
+% ============================================================================
+\section{Eliminação de Código Morto}\label{sec:opt-dce}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+A \textbf{eliminação de código morto} (DCE, \emph{Dead Code Elimination})
+remove instruções que nunca influenciam o resultado observável do programa.
+Implementamos duas fases complementares.
+
+\subsubsection*{Fase 1: Eliminação de Código Inalcançável}
+
+\begin{Definition}[Código Inalcançável]\label{def:unreachable}
+  Um comando $s$ é \textbf{inalcançável} se toda execução que o antecede passou
+  por um $\mathbf{JUMP}$ ou $\mathbf{RETURN}$ sem um rótulo intermediário.
+  Formalmente, uma instrução na posição $i$ da sequência linearizada é
+  inalcançável se a posição $i-1$ é ocupada por $\mathbf{JUMP}$ ou
+  $\mathbf{RETURN}$ e a posição $i$ não é $\mathbf{LABEL}$.
+\end{Definition}
+
+A fase 1 percorre a sequência linearizada e elimina todos os comandos
+inalcançáveis, preservando os $\mathbf{LABEL}$s que podem ser destinos de
+saltos provenientes de outros pontos do programa.
+
+\subsubsection*{Fase 2: Eliminação de Atribuições Mortas}
+
+\begin{Definition}[Atribuição Morta]\label{def:dead-assign}
+  Uma instrução $\mathbf{MOVE}(\mathbf{TEMP}(t), e)$ onde $e$ é pura é
+  \textbf{morta} se $t$ é redefinido antes de ser lido, ou se a função
+  termina (via \textbf{RETURN}) sem que $t$ seja lido.
+\end{Definition}
+
+A fase 2 realiza uma análise \emph{forward} com uma tabela de
+\emph{definições pendentes}:
+
+\begin{Definition}[Estado DAE]\label{def:dae-state}
+  O estado da análise é um par $(\mathit{pend}, \mathit{dead})$ onde:
+  \begin{itemize}
+    \item $\mathit{pend} : \mathit{Temp} \rightharpoonup \mathit{Idx}
+      \times \mathit{Expr}$ mapeia cada temporário ao índice e expressão
+      de sua atribuição mais recente ainda não consumida;
+    \item $\mathit{dead} \subseteq \mathit{Idx}$ é o conjunto de índices das
+      instruções marcadas para remoção.
+  \end{itemize}
+\end{Definition}
+
+As regras de atualização do estado são:
+
+\begin{align*}
+  \text{(novo MOVE)} &\quad
+  \mathbf{MOVE}(\mathbf{TEMP}(t), e) \text{ no índice } i: \\
+  &\quad\quad \text{consumir } \mathit{freeTemps}(e) \text{ de }
+  \mathit{pend}; \\
+  &\quad\quad \text{se } t \in \mathit{pend} \text{ com expr. pura} \to
+  \mathit{dead} \mathrel{+}= \mathit{pend}(t).\mathit{idx}; \\
+  &\quad\quad \mathit{pend}(t) \leftarrow (i, e) \\[4pt]
+  \text{(RETURN)} &\quad
+  \text{consumir usos; todos os } t \in \mathit{pend} \text{ com expr.
+  pura} \to \mathit{dead}; \\
+  &\quad\quad \mathit{pend} \leftarrow \emptyset \\[4pt]
+  \text{(LABEL, JUMP, CJUMP)} &\quad
+  \text{consumir usos; } \mathit{pend} \leftarrow \emptyset
+  \quad \text{(descarte conservador)}
+\end{align*}
+
+\begin{remark}
+  O descarte conservador em fronteiras de bloco é necessário porque, sem
+  análise de fluxo inter-bloco, não sabemos quais temporários são lidos em
+  destinos de salto.  Atribuições impuras (com $\mathbf{CALL}$, $\mathbf{MEM}$)
+  nunca são marcadas mortas, preservando seus efeitos colaterais.
+\end{remark}
+
+\begin{example}
+  Após a CSE do exemplo anterior, pode restar:
+  \begin{minted}{text}
+  MOVE(TEMP(x), CONST(5))
+  MOVE(TEMP(y), CONST(10))
+  RETURN(CONST(10))
+  \end{minted}
+  A DCE detecta que \texttt{x} e \texttt{y} são definidos mas nunca lidos
+  antes do \textbf{RETURN} (que usa diretamente $\mathbf{CONST}(10)$),
+  eliminando as duas atribuições:
+  \begin{minted}{text}
+  RETURN(CONST(10))
+  \end{minted}
+\end{example}
+
+% ============================================================================
+\section{Movimentação de Código Invariante de Laço}\label{sec:opt-licm}
+% ============================================================================
+
+\subsection{Estrutura de Laço na IRT}
+
+A IRT linearizada representa um laço \texttt{while} pelo padrão de seis
+elementos consecutivos:
+
+\[
+  \mathbf{LABEL}(\ell_h) \;\;
+  \mathbf{CJUMP}(e,\, \ell_b,\, \ell_f) \;\;
+  \mathbf{LABEL}(\ell_b) \;\;
+  \underbrace{s_1\; \cdots\; s_k}_{\text{corpo}} \;\;
+  \mathbf{JUMP}(\mathbf{NAME}(\ell_h)) \;\;
+  \mathbf{LABEL}(\ell_f)
+\]
+
+onde $\ell_h$ é a cabeça do laço, $\ell_b$ é o início do corpo, $\ell_f$ é o
+ponto de saída, e a aresta de retorno $\mathbf{JUMP}(\mathbf{NAME}(\ell_h))$
+fecha o laço.
+
+\begin{Definition}[Representação de Laço]\label{def:loop}
+  Um \textbf{laço} $L$ é uma quíntupla
+  $(\ell_h, \ell_b, \ell_f, e_{\mathit{cond}}, B)$ onde $B = [s_1, \ldots, s_k]$
+  é a lista de instruções do corpo.  Definimos:
+  \begin{align*}
+    \mathit{defs}(L) &= \{ t \mid \mathbf{MOVE}(\mathbf{TEMP}(t), \_)
+    \in B \} \\
+    \mathit{condVars}(L) &= \mathit{freeTemps}(e_{\mathit{cond}})
+  \end{align*}
+\end{Definition}
+
+\subsection{Definição Formal de LICM}
+
+\begin{Definition}[Código Invariante de Laço]\label{def:licm}
+  Uma instrução $\mathbf{MOVE}(\mathbf{TEMP}(t), e)$ na posição $i$ de $B$
+  é \textbf{invariante de laço} se:
+  \begin{enumerate}
+    \item $e$ é pura;
+    \item $\mathit{freeTemps}(e) \cap \mathit{defs}(L) = \emptyset$
+      (nenhum temporário de $e$ é modificado no laço);
+    \item $t$ é definido exatamente uma vez em $B$;
+    \item $t \notin \mathit{uses}(s_1) \cup \cdots \cup \mathit{uses}(s_{i-1})$
+      (nenhuma instrução anterior ao ponto de definição lê $t$ no corpo).
+  \end{enumerate}
+\end{Definition}
+
+A condição (3) garante que mover $t$ para antes do laço não altera o valor
+visto em iterações subsequentes; a condição (4) garante que a primeira iteração
+não lê $t$ antes de sua definição original.
+
+A transformação LICM substitui o laço original por:
+
+\[
+  \underbrace{s_{i_1} \;\cdots\; s_{i_m}}_{\text{código içado}} \;\;
+  \mathbf{LABEL}(\ell_h) \;\; \mathbf{CJUMP}(e, \ell_b, \ell_f) \;\;
+  \mathbf{LABEL}(\ell_b) \;\;
+  \underbrace{B \setminus \{s_{i_1},\ldots,s_{i_m}\}}_{\text{corpo
+  reduzido}} \;\;
+  \mathbf{JUMP}(\mathbf{NAME}(\ell_h)) \;\; \mathbf{LABEL}(\ell_f)
+\]
+
+onde $s_{i_1},\ldots,s_{i_m}$ são as instruções invariantes, na sua ordem de
+aparecimento em $B$.
+
+\begin{example}
+  O corpo do laço:
+  \begin{minted}{text}
+  MOVE(TEMP(k), BINOP(MUL, CONST(4), CONST(8)))
+  MOVE(TEMP(a), BINOP(MUL, TEMP(i), TEMP(k)))
+  MOVE(TEMP(i), BINOP(SUB, TEMP(i), CONST(1)))
+  \end{minted}
+  A instrução \texttt{MOVE(TEMP(k), ...)} é invariante: sua expressão é pura,
+  não usa nenhum temporário modificado no laço, e \texttt{k} é definido
+  exatamente uma vez.  Após LICM:
+  \begin{minted}{text}
+  MOVE(TEMP(k), BINOP(MUL, CONST(4), CONST(8)))   -- içado
+  LABEL(loop_head)
+  CJUMP(..., loop_body, loop_exit)
+  LABEL(loop_body)
+    MOVE(TEMP(a), BINOP(MUL, TEMP(i), TEMP(k)))
+    MOVE(TEMP(i), BINOP(SUB, TEMP(i), CONST(1)))
+  JUMP(NAME(loop_head))
+  LABEL(loop_exit)
+  \end{minted}
+  Se combinada com dobramento de constantes, \texttt{k} seria eliminado e o
+  literal $32$ seria usado diretamente.
+\end{example}
+
+% ============================================================================
+\section{Desenrolamento de Laço}\label{sec:opt-unroll}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+O \textbf{desenrolamento de laço} (\emph{loop unrolling}) com fator $k$ replica
+o corpo do laço $k$ vezes dentro de uma única iteração, reduzindo o número de
+avaliações da condição e abrindo oportunidades para outras otimizações.
+
+\begin{Definition}[Desenrolamento com Fator $k$]\label{def:unroll}
+  Seja $L = (\ell_h, \ell_b, \ell_f, e, B)$ um laço.
+  Para $k \geq 2$, o desenrolamento de $L$ com fator $k$ produz:
+  \[
+    \mathbf{LABEL}(\ell_h)\;\;
+    \mathbf{CJUMP}(e,\, \ell_b,\, \ell_f)\;\;
+    \mathbf{LABEL}(\ell_b)\;\;
+    B\;\;
+    C_1 \;\; C_2 \;\; \cdots \;\; C_{k-1} \;\;
+    \mathbf{JUMP}(\mathbf{NAME}(\ell_h))\;\;
+    \mathbf{LABEL}(\ell_f)
+  \]
+  onde cada cópia extra $C_j$ ($1 \leq j \leq k-1$) é:
+  \[
+    C_j = \mathbf{CJUMP}(e,\, \ell_h^{(j)},\, \ell_f)\;\;
+    \mathbf{LABEL}(\ell_h^{(j)})\;\;
+    B[\ell \mapsto \ell\text{\_u}j \mid \ell \in \mathit{InternalLabels}(B)]
+  \]
+  $\ell_h^{(j)}$ é o rótulo de entrada da $j$-ésima cópia extra, e a renomeação
+  de rótulos internos ($\ell \mapsto \ell\text{\_u}j$) evita colisões entre
+  cópias.
+\end{Definition}
+
+\begin{remark}
+  Cada cópia extra reavalia a condição $e$ antes de executar o corpo copiado.
+  Isso garante que, se o laço terminar numa iteração que não seja múltiplo de
+  $k$, a cópia extra detecta a saída e salta para $\ell_f$.  O corpo original
+  (cópia 0) permanece sob o único $\mathbf{CJUMP}$ do cabeçalho.
+\end{remark}
+
+\begin{example}
+  Para o laço com corpo $[s_1, s_2]$ e fator $k = 2$, o resultado é:
+  \begin{minted}{text}
+  LABEL(lh)
+  CJUMP(e, lb, lf)
+  LABEL(lb)
+    s1 ; s2                              -- cópia 0
+    CJUMP(e, lh_unroll_1, lf)           -- guarda extra
+    LABEL(lh_unroll_1)
+    s1_u1 ; s2_u1                       -- cópia 1 (rótulos renomeados)
+  JUMP(NAME(lh))
+  LABEL(lf)
+  \end{minted}
+\end{example}
+
+% ============================================================================
+\section{Fusão de Laços}\label{sec:opt-fusion}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+A \textbf{fusão de laços} (\emph{loop fusion}) combina dois laços adjacentes
+com a mesma condição de iteração em um único laço, reduzindo a sobrecarga de
+controle e melhorando a localidade de cache.
+
+\begin{Definition}[Adjacência]\label{def:adjacent}
+  Dois laços $L_1$ e $L_2$ são \textbf{adjacentes} se o índice do
+  $\mathbf{LABEL}(\ell_f^{L_1})$ (saída de $L_1$) é imediatamente seguido pelo
+  índice do $\mathbf{LABEL}(\ell_h^{L_2})$ (cabeça de $L_2$):
+  \[
+    \mathit{exitIdx}(L_1) + 1 = \mathit{headIdx}(L_2).
+  \]
+\end{Definition}
+
+\begin{Definition}[Fusibilidade]\label{def:fusible}
+  Dois laços adjacentes $L_1 = (\ell_h^1, \ell_b^1, \ell_f^1, e_1, B_1)$ e
+  $L_2 = (\ell_h^2, \ell_b^2, \ell_f^2, e_2, B_2)$ são \textbf{fusíveis} se:
+  \begin{enumerate}
+    \item $e_1 = e_2$ (mesma condição de iteração, igualdade estrutural);
+    \item $\mathit{last}(B_1) = \mathit{last}(B_2)$ (mesma instrução de
+      atualização da variável de indução no final de cada corpo);
+    \item \textbf{Ausência de dependência cruzada:}
+      \[
+        \bigl(\mathit{defs}(L_1) \setminus \mathit{condVars}(L_1)\bigr)
+        \cap \mathit{firstUses}(B_2) = \emptyset
+      \]
+      onde $\mathit{firstUses}(B_2)$ é o conjunto de temporários lidos em $B_2$
+      antes de serem escritos (definição abaixo).
+  \end{enumerate}
+\end{Definition}
+
+\begin{Definition}[Primeiros Usos]\label{def:first-uses}
+  $\mathit{firstUses}(B)$ é computado por um acúmulo forward sobre $B$:
+  partindo de $D = \emptyset$, $U = \emptyset$, para cada instrução $s \in B$:
+  \[
+    U \leftarrow U \cup (\mathit{uses}(s) \setminus D),
+    \qquad
+    D \leftarrow D \cup \mathit{defs}(s).
+  \]
+  O resultado é $U$ ao final da lista.
+\end{Definition}
+
+Quando $L_1$ e $L_2$ são adjacentes e fusíveis, o laço fundido é:
+
+\[
+  \mathbf{LABEL}(\ell_h^1)\;\;
+  \mathbf{CJUMP}(e_1,\, \ell_b^1,\, \ell_f^1)\;\;
+  \mathbf{LABEL}(\ell_b^1)\;\;
+  \underbrace{\mathit{init}(B_1)}_{\text{corpo de }L_1\text{ sem a
+  última instrução}} \;\;
+  B_2 \;\;
+  \mathbf{JUMP}(\mathbf{NAME}(\ell_h^1))\;\;
+  \mathbf{LABEL}(\ell_f^1)
+\]
+
+A última instrução de $B_1$ (atualização da variável de indução) é removida de
+$B_1$ porque ela já aparece no final de $B_2$.  Isso garante que a atualização
+da variável de indução ocorre exatamente uma vez por iteração fundida.
+
+\begin{example}
+  Dois laços adjacentes que acumulam duas somas independentes:
+  \begin{minted}{text}
+  -- Laço 1
+  LABEL(lh1) ; CJUMP(BINOP(GT, TEMP(n), CONST(0)), lb1, lf1)
+  LABEL(lb1)
+    MOVE(TEMP(s1), BINOP(ADD, TEMP(s1), TEMP(a)))
+    MOVE(TEMP(n),  BINOP(SUB, TEMP(n),  CONST(1)))
+  JUMP(NAME(lh1)) ; LABEL(lf1)
+
+  -- Laço 2
+  LABEL(lh2) ; CJUMP(BINOP(GT, TEMP(n), CONST(0)), lb2, lf2)
+  LABEL(lb2)
+    MOVE(TEMP(s2), BINOP(ADD, TEMP(s2), TEMP(b)))
+    MOVE(TEMP(n),  BINOP(SUB, TEMP(n),  CONST(1)))
+  JUMP(NAME(lh2)) ; LABEL(lf2)
+  \end{minted}
+  Os dois laços possuem a mesma condição e o mesmo passo.  A verificação de
+  dependência cruzada: $\mathit{defs}(L_1) \setminus \{n\} = \{s1\}$, e
+  $s1 \notin \mathit{firstUses}(B_2)$.  Portanto são fusíveis:
+  \begin{minted}{text}
+  LABEL(lh1) ; CJUMP(BINOP(GT, TEMP(n), CONST(0)), lb1, lf1)
+  LABEL(lb1)
+    MOVE(TEMP(s1), BINOP(ADD, TEMP(s1), TEMP(a)))
+    -- init(B1): sem o MOVE(n, ...)
+    MOVE(TEMP(s2), BINOP(ADD, TEMP(s2), TEMP(b)))
+    MOVE(TEMP(n),  BINOP(SUB, TEMP(n),  CONST(1)))
+  JUMP(NAME(lh1)) ; LABEL(lf1)
+  \end{minted}
+\end{example}
+
+% ============================================================================
+\section{Inlining de Funções}\label{sec:opt-inline}
+% ============================================================================
+
+\subsection{Definição Formal}
+
+O \textbf{inlining de funções} substitui uma chamada a uma função pelo corpo
+desta, eliminando a sobrecarga da chamada e expondo o código do sítio de chamada
+a outras otimizações (dobramento, propagação, CSE).
+
+\begin{Definition}[Substituição de Inlining]\label{def:inline}
+  Dada uma função $f$ com parâmetros formais $\bar{x} = (x_1, \ldots, x_n)$ e
+  corpo $B_f$, e uma chamada $\mathbf{CALL}(\mathbf{NAME}(f), [a_1,\ldots,a_n])$
+  num local de chamada com sufixo $s$, a \textbf{substituição de
+  inlining} produz:
+  \[
+    \begin{aligned}
+      \mathit{inline}(f, [a_1,\ldots,a_n])
+      &= \mathbf{ESEQ}( \\
+        &\quad \mathbf{MOVE}(\mathbf{TEMP}(x_1^s), a_1) \mathbin{;}
+        \cdots \mathbin{;}
+        \mathbf{MOVE}(\mathbf{TEMP}(x_n^s), a_n) \\
+        &\quad \mathbin{;} B_f^s \mathbin{;}
+        \mathbf{LABEL}(\ell_\mathit{exit}^s), \\
+      &\quad \mathbf{TEMP}(r^s))
+    \end{aligned}
+  \]
+  onde:
+  \begin{itemize}
+    \item $x_i^s = x_i \mathbin{++} s$: novos parâmetros renomeados;
+    \item $B_f^s$: corpo de $f$ com todos os temporários e rótulos locais
+      renomeados com o sufixo $s$;
+    \item cada $\mathbf{RETURN}([e])$ em $B_f^s$ é substituído por
+      $\mathbf{MOVE}(\mathbf{TEMP}(r^s), e) \mathbin{;}
+      \mathbf{JUMP}(\mathbf{NAME}(\ell_\mathit{exit}^s))$;
+    \item $r^s$ e $\ell_\mathit{exit}^s$ são temporário e rótulo novos para
+      capturar o valor de retorno e reunificar o fluxo de controle.
+  \end{itemize}
+  Para chamadas \emph{void} (em posição de comando), o envoltório
+  $\mathbf{ESEQ}(\cdot, \mathbf{TEMP}(r^s))$ é suprimido.
+\end{Definition}
+
+A renomeação de locais é essencial: a mesma função pode ser inlinada
+em múltiplos
+sítios, e os sufixos distintos evitam colisões de temporários entre cópias.
+
+\begin{Definition}[Elegibilidade para Inlining]\label{def:inline-eligible}
+  Uma chamada $\mathbf{CALL}(\mathbf{NAME}(f), \bar{a})$ é \textbf{elegível
+  para inlining} se:
+  \begin{enumerate}
+    \item O alvo é estático: $\mathbf{NAME}(f)$, não uma expressão computada;
+    \item $f$ não é auto-recursiva: $f \notin \mathit{calls}(B_f)$, onde
+      $\mathit{calls}$ coleta todos os $\mathbf{NAME}$ em posição de chamada;
+    \item O tamanho do corpo não excede um limiar $\tau$:
+      $|\mathit{linearize}(B_f)| \leq \tau$.
+  \end{enumerate}
+\end{Definition}
+
+A condição (2) impede que o inlining de funções recursivas gere
+expansão infinita.
+A condição (3) é uma heurística: funções grandes não devem ser inlinadas porque
+o aumento de código (\emph{code bloat}) pode degradar a localidade de cache e
+aumentar o tamanho do binário.
+
+\begin{Theorem}[Correção do Inlining]\label{thm:inline-correct}
+  Para toda função $f$ elegível e chamada
+  $\mathbf{CALL}(\mathbf{NAME}(f), [\bar{a}])$:
+  \[
+    \sigma \vdash \mathbf{CALL}(\mathbf{NAME}(f), [\bar{a}]) \Downarrow v
+    \;\iff\;
+    \sigma \vdash \mathit{inline}(f, [\bar{a}]) \Downarrow v.
+  \]
+\end{Theorem}
+
+A correção segue da regra semântica de invocação: avaliar os argumentos, ligar
+aos parâmetros e executar o corpo é exatamente o que $\mathit{inline}$ realiza
+estaticamente.
+
+Após inlinar todas as chamadas elegíveis, funções que deixam de ser
+referenciadas
+são removidas (\emph{eliminação de funções mortas}).
+
+% ============================================================================
+\section{Eliminação de Chamadas em Cauda}\label{sec:opt-tco}
+% ============================================================================
+
+\subsection{Chamadas em Posição de Cauda}
+
+Uma chamada está em \textbf{posição de cauda} numa função $g$ se o único efeito
+observável após sua execução é retornar seu resultado ao chamador de $g$.  Nesse
+caso, o frame de ativação corrente pode ser \emph{reutilizado} em vez
+de empilhar
+um novo frame, convertendo recursão em iteração com consumo de pilha $O(1)$.
+
+\begin{Definition}[Chamada em Cauda na IRT]\label{def:tail-call}
+  Na sequência linearizada de uma função, dois padrões constituem chamadas em
+  cauda:
+  \begin{align*}
+    \text{(com valor de retorno)} &\quad
+    \mathbf{RETURN}([\mathbf{CALL}(\mathbf{NAME}(f), \bar{a})]) \\
+    \text{(sem valor de retorno)} &\quad
+    \mathbf{EXP}(\mathbf{CALL}(\mathbf{NAME}(f), \bar{a})) \mathbin{;}
+    \mathbf{RETURN}([])
+  \end{align*}
+\end{Definition}
+
+\subsection{Eliminação de Chamada Recursiva em Cauda}
+
+Quando $f = g$ (auto-recursão em cauda), o frame de $g$ pode ser completamente
+reutilizado: atualiza-se os parâmetros e salta-se para o início do corpo.
+
+\begin{Definition}[Transformação TCO]\label{def:tco}
+  Seja $g$ uma função com parâmetros $\bar{x} = (x_1, \ldots, x_n)$,
+  corpo linearizado $S$, e $\ell_h = \mathtt{L\_tco\_}g$ um novo rótulo.
+  A transformação TCO de $g$ produz:
+  \begin{enumerate}
+    \item Inserir $\mathbf{LABEL}(\ell_h)$ no início de $S$.
+    \item Substituir cada padrão de cauda (Definição~\ref{def:tail-call}) por:
+      \begin{align*}
+        &\mathbf{MOVE}(\mathbf{TEMP}(t_1), a_1) \mathbin{;} \cdots \mathbin{;}
+        \mathbf{MOVE}(\mathbf{TEMP}(t_n), a_n) & \text{(passo 1:
+        avaliar argumentos)} \\
+        &\mathbf{MOVE}(\mathbf{TEMP}(x_1), \mathbf{TEMP}(t_1))
+        \mathbin{;} \cdots \mathbin{;}
+        \mathbf{MOVE}(\mathbf{TEMP}(x_n), \mathbf{TEMP}(t_n)) &
+        \text{(passo 2: atualizar parâmetros)} \\
+        &\mathbf{JUMP}(\mathbf{NAME}(\ell_h)) & \text{(passo 3:
+        reiniciar o laço)}
+      \end{align*}
+      onde $t_1, \ldots, t_n$ são novos temporários auxiliares.
+  \end{enumerate}
+\end{Definition}
+
+O \textbf{passo duplo} (avaliar para auxiliares, depois copiar para parâmetros)
+é necessário para evitar o \emph{hazard} de leitura após escrita.  Por exemplo,
+se $\bar{a} = (x_2, x_1)$ e executarmos diretamente
+$\mathbf{MOVE}(\mathbf{TEMP}(x_1), x_2) \mathbin{;}
+\mathbf{MOVE}(\mathbf{TEMP}(x_2), x_1)$,
+a segunda instrução leria o valor \emph{já sobrescrito} de $x_1$.  Os
+temporários
+auxiliares (gerados como $\mathtt{\_tco\_0}, \ldots, \mathtt{\_tco\_}(n{-}1)$)
+quebram essa dependência cíclica.
+
+\begin{example}
+  Considere uma função fatorial com acumulador:
+  \begin{minted}{text}
+  func factAcc(n, acc):
+    ...
+    RETURN [CALL(NAME(factAcc), [BINOP(BSub, TEMP(n), CONST(1)),
+                                 BINOP(BMul, TEMP(acc), TEMP(n))])]
+  \end{minted}
+  Após TCO:
+  \begin{minted}{text}
+  func factAcc(n, acc):
+    LABEL(L_tco_factAcc)
+    ...
+    MOVE(TEMP(_tco_0), BINOP(BSub, TEMP(n),   CONST(1)))
+    MOVE(TEMP(_tco_1), BINOP(BMul, TEMP(acc), TEMP(n)))
+    MOVE(TEMP(n),   TEMP(_tco_0))
+    MOVE(TEMP(acc), TEMP(_tco_1))
+    JUMP(NAME(L_tco_factAcc))
+  \end{minted}
+  A recursão é convertida num laço sem crescimento de pilha.
+\end{example}
+
+\begin{Theorem}[Correção da TCO]\label{thm:tco-correct}
+  Seja $g$ uma função com auto-recursão em cauda.  Para todo estado inicial
+  $\sigma$, $g$ e $\mathit{tco}(g)$ produzem o mesmo valor, ou ambos divergem.
+\end{Theorem}
+
+A demonstração usa indução sobre o número de chamadas recursivas: no caso base
+o laço termina na primeira iteração; no passo indutivo, cada volta ao
+$\mathbf{LABEL}(\ell_h)$ corresponde exatamente a uma chamada recursiva com
+parâmetros atualizados, preservando a semântica de substituição.
+
+% ============================================================================
+\section{Implementação em Haskell}\label{sec:opt-impl}
+% ============================================================================
+
+Esta seção descreve a implementação concreta das otimizações em Haskell,
+organizada nos módulos do pacote \texttt{bcc328}.
+
+\subsection{Infraestrutura Comum:
+\texttt{IR.Opt.Loop.Loop}}\label{sec:impl-loop}
+
+O módulo \texttt{IR.Opt.Loop.Loop} define a estrutura de dados \texttt{Loop} e
+os utilitários compartilhados pelas três otimizações de laço.
+
+\begin{minted}{haskell}
+data Loop = Loop
+  { loopHeadLabel :: Label
+  , loopBodyLabel :: Label
+  , loopExitLabel :: Label
+  , loopCond      :: Expr
+  , loopBodyStmts :: [Stmt]
+  , loopHeadIdx   :: Int
+  , loopExitIdx   :: Int
+  }
+\end{minted}
+
+A função \texttt{findLoops} varre a sequência linearizada procurando o padrão
+\texttt{LABEL lh / CJUMP / LABEL lnext / ... / JUMP(NAME lh) / LABEL lf}.
+O módulo aceita ambas as convenções de CJUMP (salto verdadeiro para o corpo ou
+para a saída), determinando qual é o corpo pelo rótulo que segue imediatamente
+o CJUMP:
+
+\begin{minted}{haskell}
+go i (LABEL lh : CJUMP cond l1 l2 : LABEL lnext : rest)
+  | lnext == l1 || lnext == l2 =
+      let (lb, lf) = if lnext == l1 then (l1, l2) else (l2, l1)
+      in case splitAtBackEdge lh rest of
+           Just (body, LABEL lf' : remaining) | lf' == lf ->
+             loop : go (exitIdx + 1) remaining
+           _ -> ...
+\end{minted}
+
+Os utilitários \texttt{linearize} e \texttt{rebuildSeq} convertem entre a
+representação em árvore SEQ e a lista plana, simplificando o processamento:
+
+\begin{minted}{haskell}
+linearize :: Stmt -> [Stmt]
+linearize (SEQ s1 s2) = linearize s1 ++ linearize s2
+linearize s           = [s]
+
+rebuildSeq :: [Stmt] -> Stmt
+rebuildSeq []     = EXP (CONST 0)
+rebuildSeq [s]    = s
+rebuildSeq (s:ss) = SEQ s (rebuildSeq ss)
+\end{minted}
+
+\subsection{Dobramento de Constantes:
+\texttt{IR.Opt.ConstFold}}\label{sec:impl-fold}
+
+O módulo \texttt{IR.Opt.ConstFold} implementa uma passagem puramente
+estrutural, sem estado, que percorre a árvore de baixo para cima:
+
+\begin{minted}{haskell}
+foldExpr :: Expr -> Expr
+foldExpr (BINOP op e1 e2) =
+  let e1' = foldExpr e1
+      e2' = foldExpr e2
+  in case (e1', e2') of
+       (CONST a, CONST b)
+         | op `notElem` [BDiv, BMod] || b /= 0
+           -> CONST (applyBinOp op a b)
+       _ -> simplify op e1' e2'
+foldExpr (MEM e)      = MEM (foldExpr e)
+foldExpr (CALL ef as) = CALL (foldExpr ef) (map foldExpr as)
+foldExpr (ESEQ s e)   = ESEQ (foldStmt s) (foldExpr e)
+foldExpr e            = e
+\end{minted}
+
+A função \texttt{simplify} é exportada para reutilização pelo módulo
+combinado, evitando duplicação de código.  Ela codifica as identidades
+algébricas da Definição~\ref{def:const-fold} como equações de padrão Haskell.
+
+\subsection{Propagação Combinada:
+\texttt{IR.Opt.ConstFoldProp}}\label{sec:impl-foldprop}
+
+O módulo \texttt{IR.Opt.ConstFoldProp} implementa a passagem combinada com um
+ambiente explícito.  O tipo \texttt{Env = Map Temp Int} representa $\rho$:
+
+\begin{minted}{haskell}
+foldPropExpr :: Env -> Expr -> Expr
+foldPropExpr env (TEMP t) =
+  case Map.lookup t env of
+    Just n  -> CONST n
+    Nothing -> TEMP t
+foldPropExpr env (BINOP op e1 e2) =
+  let e1' = foldPropExpr env e1
+      e2' = foldPropExpr env e2
+  in case (e1', e2') of
+       (CONST a, CONST b)
+         | op `notElem` [BDiv, BMod] || b /= 0
+           -> CONST (applyBinOp op a b)
+       _ -> simplify op e1' e2'
+foldPropExpr env (MEM e)      = MEM (foldPropExpr env e)
+foldPropExpr env (CALL ef as) =
+  CALL (foldPropExpr env ef) (map (foldPropExpr env) as)
+foldPropExpr _   e            = e
+\end{minted}
+
+A função \texttt{foldPropStmt} encadeia o ambiente de esquerda para direita
+através de sequências, atualizando $\rho$ a cada atribuição a temporário:
+
+\begin{minted}{haskell}
+foldPropStmt :: Env -> Stmt -> (Stmt, Env)
+foldPropStmt env (SEQ s1 s2) =
+  let (s1', env1) = foldPropStmt env  s1
+      (s2', env2) = foldPropStmt env1 s2
+  in (SEQ s1' s2', env2)
+foldPropStmt env (MOVE (TEMP t) src) =
+  let src' = foldPropExpr env src
+      env'  = case src' of
+                CONST n -> Map.insert t n env
+                _       -> Map.delete t env
+  in (MOVE (TEMP t) src', env')
+\end{minted}
+
+\subsection{CSE: \texttt{IR.Opt.CSE}}\label{sec:impl-cse}
+
+O módulo \texttt{IR.Opt.CSE} mantém o estado \texttt{CSEState} com a tabela
+$\theta$ e um contador para gerar novos temporários CSE:
+
+\begin{minted}{haskell}
+data CSEState = CSEState
+  { cseTable   :: Map Expr Temp
+  , cseCounter :: Int
+  }
+\end{minted}
+
+A função central \texttt{cseOneStmt} implementa a
+Definição~\ref{def:cse-transform}:
+
+\begin{minted}{haskell}
+cseOneStmt st (MOVE (TEMP t) e)
+  | isPure e && not (isTrivial e) =
+      case Map.lookup e (cseTable st) of
+        Just cseT ->
+          ([MOVE (TEMP t) (TEMP cseT)], killTemp t st)
+        Nothing ->
+          let k    = cseCounter st
+              cseT = "_cse" ++ show k
+              tbl1 = Map.insert e cseT (cseTable st)
+              st1  = st { cseCounter = k+1, cseTable = tbl1 }
+          in ( [MOVE (TEMP cseT) e, MOVE (TEMP t) (TEMP cseT)]
+             , killTemp t st1 )
+cseOneStmt st s | isBlockBoundary s =
+  ([s], st { cseTable = Map.empty })
+cseOneStmt st s = ([s], st)
+\end{minted}
+
+A função \texttt{killTemp t} remove da tabela todas as entradas cuja
+expressão menciona $t$, garantindo que entradas obsoletas não sejam reutilizadas
+após uma redefinição.
+
+\subsection{DCE: \texttt{IR.Opt.DCE}}\label{sec:impl-dce}
+
+O módulo \texttt{IR.Opt.DCE} implementa as duas fases sequencialmente:
+
+\begin{minted}{haskell}
+dceFuncDef fd = fd { funcBody = process (funcBody fd) }
+  where
+    process = rebuildSeq . deadAssignElim
+            . removeUnreachable . linearize
+\end{minted}
+
+A fase 1 (\texttt{removeUnreachable}) percorre a lista e descarta comandos
+entre um $\mathbf{JUMP}$/$\mathbf{RETURN}$ e o próximo $\mathbf{LABEL}$:
+
+\begin{minted}{haskell}
+removeUnreachable (s:ss)
+  | isHardJump s = s : skipUntilLabel ss
+  | otherwise    = s : removeUnreachable ss
+\end{minted}
+
+A fase 2 (\texttt{deadAssignElim}) usa \texttt{Data.List.foldl'} para processar
+os comandos indexados, acumulando o estado DAE:
+
+\begin{minted}{haskell}
+deadAssignElim stmts =
+  let indexed    = zip [0..] stmts
+      finalState = foldl' step initDAE indexed
+      extraDead  = Set.fromList
+        [ pendingIdx p | p <- Map.elems (pending finalState)
+                       , isPure (pendingExpr p) ]
+      allDead    = dead finalState `Set.union` extraDead
+  in [ s | (i, s) <- indexed, i `Set.notMember` allDead ]
+\end{minted}
+
+\subsection{LICM: \texttt{IR.Opt.Loop.LICM}}\label{sec:impl-licm}
+
+A implementação de LICM itera sobre os laços detectados, aplicando
+\texttt{hoistInvariants} a cada um:
+
+\begin{minted}{haskell}
+hoistInvariants :: Loop -> ([Stmt], [Stmt])
+hoistInvariants loop = go [] [] [] (loopBodyStmts loop)
+  where
+    defs = loopDefSet loop
+    go hoisted kept seen [] = (reverse hoisted, reverse kept)
+    go hoisted kept seen (s@(MOVE (TEMP t) e) : rest)
+      | canHoist t e seen =
+          go (s : hoisted) kept (s : seen) rest
+    go hoisted kept seen (s : rest) =
+          go hoisted (s : kept) (s : seen) rest
+
+    canHoist t e seen =
+      isPure e
+      && Set.null (freeTempsExpr e `Set.intersection` defs)
+      && defCount t (loopBodyStmts loop) == 1
+      && Set.notMember t (Set.unions (map stmtReadTemps seen))
+\end{minted}
+
+A função \texttt{spliceLoop} reconstrói a lista de instruções, inserindo os
+comandos içados imediatamente antes do \texttt{LABEL lh}:
+
+\begin{minted}{haskell}
+spliceLoop stmts loop hoisted newBody =
+  before ++ hoisted ++ prefix ++ newBody ++ suffix ++ after
+  where
+    before = take (loopHeadIdx loop) stmts
+    ...
+\end{minted}
+
+\subsection{Desenrolamento: \texttt{IR.Opt.Loop.Unroll}}\label{sec:impl-unroll}
+
+O desenrolamento usa uma função \texttt{makeCopy} para gerar cada cópia extra:
+
+\begin{minted}{haskell}
+makeCopy copyIdx =
+  let suffix    = "_u" ++ show copyIdx
+      renameMap = Map.fromList
+        [ (l, l ++ suffix) | l <- intLabels ]
+      entryLb   = lh ++ "_unroll_" ++ show copyIdx
+      renamedBody = map (renameLabels renameMap) body
+  in [CJUMP cond entryLb lf, LABEL entryLb] ++ renamedBody
+\end{minted}
+
+O laço resultante concatena o corpo original com as cópias extras:
+
+\begin{minted}{haskell}
+newLoopSlice =
+  [ LABEL lh, CJUMP cond lb lf, LABEL lb ]
+  ++ body
+  ++ concatMap makeCopy [1 .. k - 1]
+  ++ [ JUMP (NAME lh), LABEL lf ]
+\end{minted}
+
+\subsection{Fusão: \texttt{IR.Opt.Loop.Fusion}}\label{sec:impl-fusion}
+
+A condição de fusibilidade é verificada pela função \texttt{areFusible}:
+
+\begin{minted}{haskell}
+areFusible l1 l2 =
+  loopCond l1 == loopCond l2
+  && not (null (loopBodyStmts l1))
+  && not (null (loopBodyStmts l2))
+  && last (loopBodyStmts l1) == last (loopBodyStmts l2)
+  && noCrossDep l1 l2
+
+noCrossDep l1 l2 =
+  Set.null (defs1NoIndVar `Set.intersection` firstUses (loopBodyStmts l2))
+  where
+    indVars       = freeTempsExpr (loopCond l1)
+    defs1NoIndVar = loopDefSet l1 `Set.difference` indVars
+\end{minted}
+
+A fusão propriamente dita em \texttt{fuseTwo} monta o corpo fundido removendo a
+última instrução (atualização da variável de indução) do primeiro corpo:
+
+\begin{minted}{haskell}
+fuseTwo stmts l1 l2 = before ++ fusedSlice ++ after
+  where
+    body1NoUpdate = init (loopBodyStmts l1)
+    body2         = loopBodyStmts l2
+    fusedBody     = body1NoUpdate ++ body2
+    fusedSlice    =
+      [ LABEL lh, CJUMP cond lb lf, LABEL lb ]
+      ++ fusedBody
+      ++ [ JUMP (NAME lh), LABEL lf ]
+\end{minted}
+
+\subsection{Inlining: \texttt{IR.Opt.Inline}}\label{sec:impl-inline}
+
+O módulo \texttt{IR.Opt.Inline} expõe \texttt{inlineProgram} e a configuração
+\texttt{InlineConfig}, que controla o limiar de tamanho $\tau$:
+
+\begin{minted}{haskell}
+data InlineConfig = InlineConfig
+  { inlineThreshold :: Int   -- número máximo de instruções linearizadas
+  } deriving (Eq, Show)
+
+defaultInlineConfig :: InlineConfig
+defaultInlineConfig = InlineConfig { inlineThreshold = 10 }
+\end{minted}
+
+A entrada de \texttt{inlineProgram} determina quais funções são elegíveis e as
+aplica em cada definição:
+
+\begin{minted}{haskell}
+inlineProgram :: InlineConfig -> Program -> Program
+inlineProgram cfg prog =
+  removeDeadFuncs $
+    map (inlineFuncDef funcMap inlineable) prog
+  where
+    funcMap    = Map.fromList [(funcName fd, fd) | fd <- prog]
+    inlineable = Set.fromList
+      [ funcName fd
+      | fd <- prog
+      , funcName fd /= "main"
+      , funcSize fd <= inlineThreshold cfg
+      , not (isSelfRecursive fd) ]
+\end{minted}
+
+A função \texttt{isSelfRecursive} coleta todos os \texttt{NAME} usados em
+posição de chamada e verifica se o nome da função está entre eles.
+\texttt{removeDeadFuncs} filtra definições que não são mais referenciadas por
+nenhuma outra função (exceto \texttt{main}).
+
+A reescrita propriamente dita usa uma mônada de estado para gerar
+novos sufixos únicos (\texttt{InlineM = State Int}):
+
+\begin{minted}{haskell}
+inlineValueCall :: Map Label FuncDef -> Set Label
+                -> Label -> [Expr] -> InlineM Expr
+inlineValueCall fm il f args = do
+  n <- freshId
+  let suf     = "_il" ++ show n
+      fd      = fm Map.! f
+      locals  = localLabels (funcBody fd)
+      body0   = renameLocals suf locals (funcBody fd)
+      retTemp = "_il_ret" ++ suf
+      exitLbl = "L_il_exit" ++ suf
+      body1   = transformReturns retTemp exitLbl body0
+      il'     = Set.delete f il   -- evita re-inlining do mesmo f
+  args'  <- mapM (rewriteExpr fm il) args
+  body2  <- rewriteStmt fm il'     body1
+  let pMoves = paramMoveList (map (++ suf) (funcParams fd)) args'
+      full   = seqStmts (pMoves ++ [body2, LABEL exitLbl])
+  return (ESEQ full (TEMP retTemp))
+\end{minted}
+
+A função \texttt{renameLocals} percorre toda a árvore de comandos e expressões,
+adicionando o sufixo $s$ a cada temporário e a cada rótulo que seja \emph{local}
+à função (definido por \texttt{LABEL} dentro de seu corpo).  Rótulos externos
+(nomes de outras funções em chamadas) são preservados intactos.
+\texttt{transformReturns} percorre o corpo e substitui cada
+$\mathbf{RETURN}([e])$ pelo par $\mathbf{MOVE}(r^s, e) \mathbin{;}
+\mathbf{JUMP}(\ell_\mathit{exit}^s)$.
+
+Para chamadas void (em posição de comando), \texttt{inlineVoidCall} produz um
+\texttt{Stmt} diretamente, evitando o envoltório \texttt{ESEQ}.
+
+\subsection{Eliminação de Chamadas em Cauda:
+\texttt{IR.Opt.TCO}}\label{sec:impl-tco}
+
+O módulo \texttt{IR.Opt.TCO} implementa a Definição~\ref{def:tco} em duas
+etapas: detecção e transformação.
+
+A detecção procura os dois padrões de cauda na lista linearizada:
+
+\begin{minted}{haskell}
+anyTailCall :: Label -> [Stmt] -> Bool
+anyTailCall f stmts =
+  any isTCO stmts ||
+  any isVoidTCO (zip stmts (drop 1 stmts))
+  where
+    isTCO (RETURN [CALL (NAME g) _])          = f == g
+    isTCO _                                    = False
+    isVoidTCO (EXP (CALL (NAME g) _), RETURN []) = f == g
+    isVoidTCO _                                   = False
+\end{minted}
+
+A transformação gera os temporários auxiliares e reescreve os padrões
+identificados:
+
+\begin{minted}{haskell}
+tcoFuncDef :: FuncDef -> FuncDef
+tcoFuncDef fd
+  | not (anyTailCall (funcName fd) stmts) = fd
+  | otherwise = fd { funcBody = rebuildSeq (LABEL lh : transformed) }
+  where
+    stmts       = linearize (funcBody fd)
+    lh          = "L_tco_" ++ funcName fd
+    transformed = transformStmts (funcName fd) (funcParams fd) lh stmts
+
+transformStmts :: Label -> [Temp] -> Label -> [Stmt] -> [Stmt]
+transformStmts f params lh = go
+  where
+    n        = length params
+    tcoTemps = ["_tco_" ++ show i | i <- [0 .. n - 1]]
+
+    makeTCO :: [Expr] -> [Stmt]
+    makeTCO args =
+      zipWith (\t e -> MOVE (TEMP t) e) tcoTemps args ++
+      zipWith (\p t -> MOVE (TEMP p) (TEMP t)) params tcoTemps ++
+      [JUMP (NAME lh)]
+
+    go [] = []
+    go (RETURN [CALL (NAME g) args] : rest)
+      | g == f = makeTCO args ++ go rest
+    go (EXP (CALL (NAME g) args) : RETURN [] : rest)
+      | g == f = makeTCO args ++ go rest
+    go (s : rest) = s : go rest
+\end{minted}
+
+Os temporários auxiliares $\mathtt{\_tco\_0}, \ldots$ implementam o passo duplo
+da Definição~\ref{def:tco}, quebrando dependências cíclicas entre parâmetros.
+A função percorre a lista de comandos linearizados com \texttt{go}, consumindo
+dois elementos de uma vez no padrão void (para que o \texttt{RETURN []} não seja
+emitido separadamente).
+
+\subsection{Pipeline de Otimizações:
+\texttt{IR.Opt.Pipeline}}\label{sec:impl-pipeline}
+
+O módulo \texttt{IR.Opt.Pipeline} compõe todas as otimizações e define o
+pipeline completo.  O utilitário \texttt{fixedPoint} do módulo
+\texttt{Utils.Fixpoint} aplica uma transformação até que o resultado se
+estabilize:
+
+\begin{minted}{haskell}
+optAll :: Program -> Program
+optAll =
+    dceProgram
+  . cseProgram
+  . unrollProgram defaultUnrollConfig
+  . fixedPoint fuseProgram
+  . cseProgram
+  . fixedPoint foldPropProgram
+  . licmProgram
+  . fixedPoint foldPropProgram
+  . fixedPoint (inlineProgram defaultInlineConfig)
+  . tcoProgram
+\end{minted}
+
+A composição respeita as dependências entre otimizações:
+\begin{enumerate}
+  \item \texttt{tcoProgram} converte auto-recursão em cauda em laços, expondo
+    estrutura iterativa para as otimizações seguintes.
+  \item \texttt{inlineProgram} a ponto fixo substitui chamadas pequenas pelos
+    respectivos corpos; funções mortas são removidas.  Pode expor novas
+    constantes e novas chamadas em cauda.
+  \item \texttt{foldPropProgram} a ponto fixo aproveita as constantes expostas
+    pelo inlining.
+  \item \texttt{licmProgram} move código invariante para fora dos laços criados
+    pela TCO e pelo inlining.
+  \item Uma segunda rodada de \texttt{foldPropProgram} dobra constantes
+    içadas.
+  \item \texttt{cseProgram} elimina subexpressões duplicadas.
+  \item \texttt{fuseProgram} a ponto fixo combina laços adjacentes.
+  \item \texttt{unrollProgram} replica corpos de laços.
+  \item \texttt{cseProgram} e \texttt{dceProgram} limpam o código após o
+    desenrolamento.
+\end{enumerate}
+
+Cada otimização isolada também pode ser invocada pelo executável \texttt{ir}:
+
+\begin{minted}{text}
+ir --opt-fold      arquivo.ir   # dobramento de constantes
+ir --opt-prop      arquivo.ir   # propagação + dobramento
+ir --opt-cse       arquivo.ir   # eliminação de subexpressões comuns
+ir --opt-dce       arquivo.ir   # eliminação de código morto
+ir --opt-licm      arquivo.ir   # movimentação de invariante de laço
+ir --opt-unroll 4  arquivo.ir   # desenrolamento com fator 4
+ir --opt-fusion    arquivo.ir   # fusão de laços
+ir --opt-inline    arquivo.ir   # inlining de funções
+ir --opt-tco       arquivo.ir   # eliminação de chamadas em cauda
+ir --opt-all       arquivo.ir   # pipeline completo
+\end{minted}
+
+% ============================================================================
+\section{Conclusão}\label{sec:opt-conclusao}
+% ============================================================================
+
+Este capítulo apresentou formalmente dez otimizações aplicadas à representação
+intermediária em árvore (IRT): dobramento de constantes, propagação de
+constantes, eliminação de subexpressões comuns, eliminação de código morto,
+movimentação de código invariante de laço, desenrolamento, fusão de laços,
+inlining de funções e eliminação de chamadas em cauda.
+
+Para cada otimização foram apresentados:
+\begin{itemize}
+  \item a definição formal em termos da IRT;
+  \item as condições de correção que garantem a equivalência observacional
+    entre o programa original e o otimizado;
+  \item exemplos concretos na IRT;
+  \item a implementação em Haskell, destacando a correspondência entre
+    teoria e código.
+\end{itemize}
+
+As otimizações são compostas em um pipeline que aplica cada transformação na
+ordem que maximiza as oportunidades de melhoria.  O uso de ponto fixo garante
+que otimizações mutuamente dependentes (como dobramento e propagação) são
+aplicadas até a convergência.

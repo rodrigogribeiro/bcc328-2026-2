@@ -1,0 +1,1000 @@
+\chapter{Semântica operacional para uma linguagem imperativa simples}
+
+\section{Introdução}
+
+No capítulo anterior, definimos a semântica operacional da linguagem
+\emph{Line}, que inclui atribuição, leitura e impressão. Com isso, já
+conseguimos modelar programas que executam uma sequência fixa de
+comandos. No entanto, programas reais precisam de \textbf{controle de
+fluxo}: executar blocos diferentes dependendo de uma condição, e
+repetir um bloco enquanto uma condição permanecer verdadeira.
+
+Este capítulo estende a linguagem com \textbf{condicionais}
+(if/else) e \textbf{repetição}
+(while), formando a linguagem \emph{While}.
+Para suportar condições, a linguagem de expressões também é estendida
+com \textbf{valores booleanos} e operações de comparação. Definimos a
+semântica small-step e big-step para todas as novas construções e
+mostramos como essa especificação se traduz no interpretador
+disponível em
+\begin{flushleft}
+  \verb|While/Interp/WhileInterp.hs|
+\end{flushleft}
+
+\section{A Linguagem While}
+
+A linguagem \emph{While} estende \emph{Line} com dois novos comandos
+e uma classe de expressões booleanas. A sua sintaxe abstrata é:
+
+\[
+  \begin{array}{lcl}
+    \mathit{prog} & ::= & s^\star\\
+    s & ::= & x \mathbin{:=} e
+    \mid \mathbf{read}\; x
+    \mid \mathbf{print}\; e \\
+    &    & \mid\; \mathbf{if}\; e\; \mathbf{then}\; \{s^\star\}\;
+    \mathbf{else}\; \{s^\star\} \\
+    &    & \mid\; \mathbf{while}\; e\; \mathbf{do}\; \{s^\star\} \\
+    e & ::= & v \mid x
+    \mid e_1 + e_2 \mid e_1 \star e_2 \\
+    &    & \mid\; e_1 < e_2 \mid e_1 = e_2 \mid e_1 \mathbin{|} e_2
+    \mid \neg e \\
+    v & ::= & n \mid \mathbf{true} \mid \mathbf{false}
+  \end{array}
+\]
+
+Os valores agora incluem inteiros e booleanos. Em Haskell:
+
+\begin{minted}{haskell}
+data Value
+  = VInt  Int
+  | VBool Bool
+
+data Exp
+  = EValue Value
+  | EVar   Var
+  | Exp :+: Exp  -- adição
+  | Exp :*: Exp  -- multiplicação
+  | Exp :<: Exp  -- menor que
+  | Exp :=: Exp  -- igualdade
+  | Exp :|: Exp  -- disjunção
+  | ENot Exp     -- negação
+
+data Stmt
+  = SAssign Var Exp
+  | SRead   Var
+  | SPrint  Exp
+  | SIf    Exp Block Block
+  | SWhile Exp Block
+
+type Block = [Stmt]
+\end{minted}
+
+\section{Ambientes}
+
+O ambiente \(\sigma : \mathit{Var} \rightharpoonup \mathit{Val}\)
+agora associa variáveis a \textbf{valores} (inteiros ou booleanos).
+A notação \(\sigma(x)\), \(\sigma[x \mapsto v]\) e \(\emptyset\) é a
+mesma do capítulo anterior.
+
+\section{Semântica Small-Step}
+
+\subsection{Expressões}
+
+Os valores \(v\) são as formas terminais; qualquer expressão que
+não seja um valor pode ainda ser reduzida. As regras para adição e
+multiplicação são idênticas ao capítulo anterior. As novas regras
+tratam das operações booleanas.
+
+\textbf{Variável:}
+
+\[
+  \infer[_{\{Var\}}]{(\sigma,\, x) \to (\sigma,\, \sigma(x))}{x \in
+  \mathrm{dom}(\sigma)}
+\]
+
+\textbf{Redução de subexpressões:}
+
+Para cada operador binário \(\oplus\), as regras (OpL) e (OpR)
+reduzem o operando esquerdo primeiro e depois o direito,
+preservando o ambiente:
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{OpL\}}]{(\sigma,\, e_1 \oplus e_2)\to (\sigma,\, e_1'
+    \oplus e_2)}{(\sigma, e_1) \to (\sigma, e_1')}
+    &
+    \infer[_{\{OpR\}}]{(\sigma,\, v_1 \oplus e_2)\to (\sigma,\, v_1
+    \oplus e_2')}{(\sigma, e_2) \to (\sigma, e_2')}
+  \end{array}
+\]
+
+\textbf{Operações sobre valores:}
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Add\}}]{(\sigma,\, n_1 + n_2) \to (\sigma,\, n_1
+        \mathbin{\hat{+}}
+    n_2)}{}
+    &
+    \infer[_{\{Mul\}}]{(\sigma,\, n_1 \star n_2) \to (\sigma,\, n_1
+    \mathbin{\hat{\star}} n_2)}{}
+  \end{array}
+\]
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Lt\}}]{(\sigma,\, n_1 < n_2) \to (\sigma,\, n_1 \mathbin{\hat{<}}
+    n_2)}{}
+    &
+    \infer[_{\{Eq\}}]{(\sigma,\, v_1 = v_2) \to (\sigma,\, v_1 \mathbin{\hat{=}}
+    v_2)}{}
+  \end{array}
+\]
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Or\}}]{(\sigma,\, b_1 \mathbin{|} b_2) \to (\sigma,\, b_1
+    \mathbin{\hat{\lor}} b_2)}{}
+    &
+    \infer[_{\{Not\}}]{(\sigma,\, \neg b) \to (\sigma,\, \hat{\neg}\, b)}{}\\ \\
+    \multicolumn{2}{c}{
+      \infer[_{\{NotStep\}}]{(\sigma,\, \neg e) \to (\sigma,\, \neg
+      e')}{(\sigma,\, e) \to (\sigma,\, e')}
+    }
+  \end{array}
+\]
+
+Os operadores com acento (\(\hat{+}\), \(\hat{<}\), \(\hat{\lor}\),
+etc.) denotam as operações matemáticas correspondentes, para
+distingui-las dos operadores da linguagem.
+
+\subsection{Comandos}
+
+As regras para \haskell{SAssign},
+\haskell{SRead}, \haskell{SPrint} e
+para sequências são as mesmas do capítulo anterior. As novas regras
+tratam de \haskell{if} e \haskell{while}.
+
+\textbf{Condicional: avaliação da condição}
+
+\[
+  \infer[_{\{IfStep\}}]{(\sigma,\; \mathbf{if}\; e\;
+    \mathbf{then}\; B_1\; \mathbf{else}\; B_2) \to (\sigma,\;
+      \mathbf{if}\; e'\; \mathbf{then}\; B_1\; \mathbf{else}\;
+  B_2)}{(\sigma, e) \to (\sigma, e')}
+\]
+
+\textbf{Condicional: ramo verdadeiro}
+
+\[
+  \infer[_{\{IfTrue\}}]{(\sigma,\; \mathbf{if}\; \mathbf{true}\; \mathbf{then}\;
+  B_1\; \mathbf{else}\; B_2) \to (\sigma,\; B_1)}{}
+\]
+
+\textbf{Condicional: ramo falso}
+
+\[
+  \infer[_{\{IfFalse\}}]{(\sigma,\; \mathbf{if}\; \mathbf{false}\;
+      \mathbf{then}\;
+  B_1\; \mathbf{else}\; B_2) \to (\sigma,\; B_2)}{}
+\]
+
+\textbf{While: iteração}
+
+A regra chave para while é a de
+\textbf{iteração condicional}: o laço se transforma em um condicional que,
+no ramo verdadeiro, executa o corpo e depois o laço novamente.
+
+\[
+  \infer[_{\{While\}}]{(\sigma,\; \mathbf{while}\; e\; \mathbf{do}\; B) \to
+    (\sigma,\; \mathbf{if}\; e\; \mathbf{then}\; (B;\; \mathbf{while}\;
+  e\; \mathbf{do}\; B)\; \mathbf{else}\; \epsilon)}{}
+\]
+
+onde \(\epsilon\) denota a sequência vazia. Esta regra captura a
+semântica de repetição de forma simples: o
+while se reduz a um condicional cujo ramo
+verdadeiro contém o corpo seguido do próprio while.
+
+\subsection{Exemplo: Small-Step}
+
+Considere o programa:
+
+\begin{verbatim}
+i := 0
+while i < 3 do { i := i + 1 }
+print i
+\end{verbatim}
+
+Partindo de \(\emptyset\), após a atribuição inicial temos \(\sigma_0
+= [i \mapsto 0]\). Mostramos os passos de uma iteração do laço:
+
+\[
+  (\sigma_0,\; \mathbf{while}\; i < 3\; \mathbf{do}\; \{i
+  \mathbin{:=} i+1\})
+\] \[
+  \xrightarrow{\text{While}}
+  (\sigma_0,\; \mathbf{if}\; i < 3\; \mathbf{then}\; \{i \mathbin{:=}
+  i+1;\; \mathbf{while}\ldots\}\; \mathbf{else}\; \epsilon)
+\] \[
+  \xrightarrow{\text{IfStep, Var, Lt}}
+  (\sigma_0,\; \mathbf{if}\; \mathbf{true}\; \mathbf{then}\; \{i
+  \mathbin{:=} i+1;\; \mathbf{while}\ldots\}\; \mathbf{else}\; \epsilon)
+\] \[
+  \xrightarrow{\text{IfTrue}}
+  (\sigma_0,\; i \mathbin{:=} i+1;\; \mathbf{while}\; i < 3\;
+  \mathbf{do}\; \{i \mathbin{:=} i+1\})
+\] \[
+  \xrightarrow{\text{Assign}}
+  ([i \mapsto 1],\; \mathbf{while}\; i < 3\; \mathbf{do}\; \{i
+  \mathbin{:=} i+1\})
+\]
+
+Após três iterações, \(\sigma = [i \mapsto 3]\). Na quarta, a
+condição \(3 < 3\) reduz para \(\mathbf{false}\) e a regra (IfFalse)
+seleciona \(\epsilon\), terminando o laço.
+
+\subsection{Extensão TImp: Semântica Small-Step}\label{sec:timp-small-step}
+
+A linguagem \emph{TImp} estende \emph{While} com construções de
+registro e funções. As regras small-step para registros seguem o
+mesmo padrão das construções já apresentadas; a semântica completa de
+chamadas de função é especificada na forma big-step na
+Seção~\ref{sec:timp-big-step}, pois o comando \haskell{return}
+exigiria um modelo de pilha de chamadas para ser tratado em small-step.
+
+As configurações passam a incluir o ambiente de funções \(\Phi\):
+\((\sigma, \Phi, e)\) para expressões e \((\sigma, \Phi, s)\) para
+comandos.
+
+\paragraph{Construção de registro.}
+
+Os campos são avaliados da esquerda para a direita. Enquanto houver
+um campo não-valor, ele é reduzido (NewStep); quando todos os campos
+são valores, o registro é construído (New):
+
+\[
+  \infer[_{\{NewStep\}}]
+  {(\sigma, \Phi,\;
+    \mathbf{new}\; R\,\{f_1\!=\!v_1,\ldots,f_i\!=\!e_i,\ldots\})
+    \to (\sigma', \Phi,\;
+  \mathbf{new}\; R\,\{f_1\!=\!v_1,\ldots,f_i\!=\!e_i',\ldots\})}
+  {(\sigma, \Phi,\, e_i) \to (\sigma', \Phi,\, e_i')}
+\]
+
+\[
+  \infer[_{\{New\}}]
+  {(\sigma, \Phi,\; \mathbf{new}\; R\,\{f_1\!=\!v_1,\ldots,f_n\!=\!v_n\})
+    \to (\sigma, \Phi,\;
+  \mathbf{rec}(R,\,\{f_1 \mapsto v_1,\ldots,f_n \mapsto v_n\}))}
+  {}
+\]
+
+\paragraph{Acesso a campo.}
+
+\[
+  \infer[_{\{FieldStep\}}]
+  {(\sigma, \Phi,\; e.f) \to (\sigma', \Phi,\; e'.f)}
+  {(\sigma, \Phi,\, e) \to (\sigma', \Phi,\, e')}
+\]
+
+\[
+  \infer[_{\{Field\}}]
+  {(\sigma, \Phi,\; \mathbf{rec}(R,\mathit{flds}).f) \to
+  (\sigma, \Phi,\; \mathit{flds}(f))}
+  {f \in \mathrm{dom}(\mathit{flds})}
+\]
+
+\paragraph{Declaração de variável.}
+
+\[
+  \infer[_{\{DeclStep\}}]
+  {(\sigma, \Phi,\; \mathbf{var}\; x \mathbin{:} \tau = e) \to
+  (\sigma', \Phi,\; \mathbf{var}\; x \mathbin{:} \tau = e')}
+  {(\sigma, \Phi,\, e) \to (\sigma', \Phi,\, e')}
+\]
+
+\[
+  \infer[_{\{Decl\}}]
+  {(\sigma, \Phi,\; \mathbf{var}\; x \mathbin{:} \tau = v) \to
+  (\sigma[x \mapsto v],\; \Phi,\; \epsilon)}
+  {}
+\]
+
+\paragraph{Atribuição de campo.}
+
+\[
+  \infer[_{\{FieldAssignStep\}}]
+  {(\sigma, \Phi,\; x.f \mathbin{:=} e) \to
+  (\sigma', \Phi,\; x.f \mathbin{:=} e')}
+  {(\sigma, \Phi,\, e) \to (\sigma', \Phi,\, e')}
+\]
+
+\[
+  \infer[_{\{FieldAssign\}}]
+  {(\sigma, \Phi,\; x.f \mathbin{:=} v)
+    \to (\sigma[x \mapsto \mathbf{rec}(R,\,\mathit{flds}[f \mapsto
+  v])],\; \Phi,\; \epsilon)}
+  {\sigma(x) = \mathbf{rec}(R,\mathit{flds})}
+\]
+
+\paragraph{Avaliação de argumentos.}
+
+Os argumentos de uma chamada de função são avaliados da esquerda para
+a direita antes da invocação. A regra de invocação, que cria um
+novo ambiente de ativação e executa o corpo, é especificada como:
+
+\[
+  \infer[_{\{CallStep\}}]
+  {(\sigma, \Phi,\;
+    f(v_1,\ldots,v_{i-1},e_i,\ldots,e_n)) \to
+    (\sigma', \Phi,\;
+  f(v_1,\ldots,v_{i-1},e_i',\ldots,e_n))}
+  {(\sigma, \Phi,\, e_i) \to (\sigma', \Phi,\, e_i')}
+\]
+
+\section{Semântica Big-Step}
+
+\subsection{Expressões}
+
+A relação \(\sigma \vdash e \Downarrow v\) agora produz um
+\textbf{valor} (inteiro ou booleano).
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Val\}}]{\sigma \vdash v \Downarrow v}{}
+    &
+    \infer[_{\{Var\}}]{\sigma \vdash x
+    \Downarrow \sigma(x)}{x \in \mathrm{dom}(\sigma)}
+  \end{array}
+\]
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Add\}}]{\sigma \vdash e_1 + e_2 \Downarrow n_1
+    \mathbin{\hat{+}} n_2}{\sigma \vdash e_1 \Downarrow n_1 & \sigma \vdash e_2
+    \Downarrow n_2}
+    &
+    \infer[_{\{Mul\}}]{\sigma \vdash e_1 \star e_2 \Downarrow n_1
+    \mathbin{\hat{\star}} n_2}{\sigma \vdash e_1 \Downarrow n_1 &
+    \sigma \vdash e_2\Downarrow n_2}
+  \end{array}
+\]
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Lt\}}]{\sigma \vdash e_1 < e_2 \Downarrow n_1
+    \mathbin{\hat{<}} n_2}
+    {\sigma \vdash e_1 \Downarrow n_1 \quad \sigma \vdash e_2
+    \Downarrow n_2}
+    &
+    \infer[_{\{Eq\}}]{\sigma \vdash e_1 = e_2 \Downarrow v_1
+    \mathbin{\hat{=}} v_2}{\sigma \vdash e_1 \Downarrow v_1 & \sigma \vdash e_2
+    \Downarrow v_2}
+  \end{array}
+\]
+
+\[
+  \begin{array}{cc}
+    \infer[_{\{Or\}}]{\sigma \vdash e_1 \mathbin{|} e_2 \Downarrow b_1
+    \mathbin{\hat{\lor}} b_2}{\sigma \vdash e_1 \Downarrow b_1 &
+      \sigma \vdash e_2
+    \Downarrow b_2}
+    &
+    \infer[_{\{Not\}}]{\sigma \vdash \neg e \Downarrow \hat{\neg}\, b}
+    {\sigma \vdash e \Downarrow b}
+  \end{array}
+\]
+
+\subsection{Comandos}
+
+As regras para \haskell{SAssign},
+\haskell{SRead}, \haskell{SPrint},
+(SeqNil) e (SeqCons) permanecem iguais ao capítulo anterior. As novas
+regras são:
+
+\textbf{Condicional: ramo verdadeiro}
+
+\[
+  \infer[_{\{IfTrue\}}]{\sigma,\; \mathbf{if}\; e\; \mathbf{then}\;
+    B_1\; \mathbf{else}\;
+  B_2 \;\Downarrow\; \sigma'}{\sigma \vdash e \Downarrow
+    \mathbf{true} \quad \sigma,\; B_1
+  \Downarrow \sigma'}
+\]
+
+\textbf{Condicional: ramo falso}
+
+\[
+  \infer[_{\{IfFalse\}}]{\sigma,\; \mathbf{if}\; e\; \mathbf{then}\;
+    B_1\; \mathbf{else}\;
+  B_2 \;\Downarrow\; \sigma'}{\sigma \vdash e \Downarrow
+    \mathbf{false} \quad \sigma,\; B_2
+  \Downarrow \sigma'}
+\]
+
+\textbf{While: condição falsa (terminação)}
+
+\[
+  \infer[_{\{WhileFalse\}}]{\sigma,\; \mathbf{while}\; e\;
+  \mathbf{do}\; B \;\Downarrow\; \sigma}
+  {\sigma \vdash e \Downarrow \mathbf{false}}
+\]
+
+\textbf{While: condição verdadeira (iteração)}
+
+\[
+  \infer[_{\{WhileTrue\}}]{\sigma,\; \mathbf{while}\; e\;
+  \mathbf{do}\; B \;\Downarrow\; \sigma''}
+  {\sigma \vdash e \Downarrow \mathbf{true}
+    &  \sigma,\; B \Downarrow \sigma'
+  & \sigma',\; \mathbf{while}\; e\; \mathbf{do}\; B \Downarrow \sigma''}
+\]
+
+A regra (WhileTrue) é recursiva: após executar o corpo \(B\) e obter
+\(\sigma'\), o while é aplicado novamente a
+partir de \(\sigma'\). A recursão termina quando a condição se torna
+\(\mathbf{false}\), coberta por (WhileFalse). Se a condição nunca se
+tornar falsa, não existe derivação big-step finita: o programa diverge.
+
+\subsection{Exemplos: Big-Step}
+
+\textbf{Exemplo 1:} Considere o seguinte programa:
+
+\begin{verbatim}
+if 2 < 3 then {
+  x := 10;
+} else {
+  x := 20;
+}
+\end{verbatim}
+
+\[
+  \dfrac{
+    \dfrac{
+      \dfrac{}{\emptyset \vdash 2 \Downarrow 2}
+      \quad
+      \dfrac{}{\emptyset \vdash 3 \Downarrow 3}
+    }{\emptyset \vdash 2 < 3 \Downarrow \mathbf{true}}
+    \quad
+    \dfrac{
+      \dfrac{}{\emptyset \vdash 10 \Downarrow 10}
+    }{\emptyset,\; x \mathbin{:=} 10 \;\Downarrow\; [x \mapsto 10]}
+  }{\emptyset,\; \mathbf{if}\; 2<3\; \mathbf{then}\; \{x \mathbin{:=}
+    10\}\; \mathbf{else}\; \{x \mathbin{:=} 20\} \;\Downarrow\; [x
+  \mapsto 10]}
+\]
+
+\textbf{Exemplo 2:} Considere o programa:
+
+\begin{verbatim}
+while i < 2 do {
+   i := i + 1;
+}
+\end{verbatim}
+e o estado inicial \(\sigma_0 = [i \mapsto 0]\).
+
+Abreviemos \(\sigma_k = [i \mapsto k]\) e o programa anterior
+por \(W\).
+
+\[
+  \dfrac{
+    \sigma_0 \vdash i < 2 \Downarrow \mathbf{true}
+    \quad
+    \sigma_0,\; i \mathbin{:=} i+1 \;\Downarrow\; \sigma_1
+    \quad
+    \dfrac{
+      \sigma_1 \vdash i < 2 \Downarrow \mathbf{true}
+      \quad
+      \sigma_1,\; i \mathbin{:=} i+1 \;\Downarrow\; \sigma_2
+      \quad
+      \dfrac{
+        \sigma_2 \vdash i < 2 \Downarrow \mathbf{false}
+      }{\sigma_2,\; W \;\Downarrow\; \sigma_2}
+    }{\sigma_1,\; W \;\Downarrow\; \sigma_2}
+  }{\sigma_0,\; W \;\Downarrow\; \sigma_2}
+\]
+
+A derivação é uma árvore de profundidade proporcional ao número de
+iterações. O laço termina porque \(i\) cresce a cada iteração e
+eventualmente atinge 2.
+
+\subsection{Extensão TImp: Semântica Big-Step}\label{sec:timp-big-step}
+
+A linguagem \emph{TImp} estende \emph{While} com declarações de
+funções e tipos registro. Nesta seção apresentamos os domínios
+semânticos e as regras big-step para as novas construções.
+
+\subsubsection{Sintaxe Estendida}
+
+Um programa TImp consiste em uma sequência de declarações seguida de
+um bloco de comandos de nível superior:
+
+\[
+  \begin{array}{lcl}
+    \mathit{prog}  & ::= & \mathit{decl}^*\; s^* \\[4pt]
+    \mathit{decl}  & ::= &
+    \mathbf{record}\; R\; \{\, \overline{f_i \mathbin{:} \tau_i}\,\}  \\
+    & \mid &
+    \mathbf{fn}\; f\,(\overline{x_i \mathbin{:} \tau_i}) \mathbin{:}
+    \rho\; \{\, s^*\,\} \\[4pt]
+    \rho           & ::= & \mathbf{void} \mid \tau \\[4pt]
+    \tau           & ::= & \mathbf{int} \mid \mathbf{bool} \mid
+    \mathbf{string} \mid R \\[4pt]
+    s              & ::= & \cdots \mid
+    \mathbf{var}\; x \mathbin{:} \tau \mathbin{=} e \mid
+    x.f \mathbin{:=} e \mid
+    \mathbf{return}\; e \mid \mathbf{return} \mid
+    f(e_1,\ldots,e_n) \\[4pt]
+    e              & ::= & \cdots \mid e.f \mid
+    \mathbf{new}\; R\,\{\,\overline{f_i \mathbin{=} e_i}\,\} \mid
+    f(e_1,\ldots,e_n)
+  \end{array}
+\]
+
+Os reticências \(\cdots\) denotam as construções já presentes em
+\emph{While}.
+
+\subsubsection{Domínios Semânticos Estendidos}
+
+\paragraph{Valores.}
+O domínio de valores é estendido com valores registro e com o valor
+unitário (resultado de funções \haskell{void}):
+
+\[
+  v \;::=\; n \;\mid\; b \;\mid\; s \;\mid\;
+  \mathbf{rec}(R,\, \{f_1 \mapsto v_1, \ldots, f_n \mapsto v_n\})
+  \;\mid\; \mathbf{unit}
+\]
+
+Um valor registro \(\mathbf{rec}(R, \mathit{flds})\) carrega o nome do
+tipo \(R\) e uma função parcial \(\mathit{flds}\) que mapeia nomes de
+campo a valores. A semântica adota \textbf{semântica de valor} para
+registros: toda atribuição e passagem de parâmetro copia o registro
+inteiro.
+
+\paragraph{Ambientes de funções.}
+Além do ambiente de variáveis \(\sigma\), a semântica introduz um
+\textbf{ambiente de funções} global
+
+\[
+  \Phi : \mathit{Name} \rightharpoonup
+  (\overline{x_i},\; B)
+\]
+
+que mapeia cada nome de função à sua lista de parâmetros formais
+\(\overline{x_i}\) e ao seu corpo \(B\). O ambiente \(\Phi\) é
+construído uma única vez a partir das declarações do programa e
+permanece imutável durante a execução.
+
+\paragraph{Resultado de bloco.}
+As construções \haskell{return} interrompem a execução normal de um
+bloco e devolvem um valor ao chamador. Para modelar esse comportamento,
+a relação de avaliação de comandos e blocos passa a produzir um
+\textbf{resultado}:
+
+\[
+  r \;::=\; \mathbf{normal} \;\mid\; {\uparrow}\, v
+\]
+
+O resultado \(\mathbf{normal}\) indica terminação sem retorno; o
+resultado \({\uparrow}\, v\) indica que um \haskell{return} foi
+executado e o valor \(v\) está sendo propagado para o ponto de chamada.
+A relação de avaliação de comandos torna-se \(\sigma,\Phi \vdash s
+\Downarrow (\sigma', r)\) e a de blocos, \(\sigma,\Phi \vdash B
+\Downarrow (\sigma', r)\).
+
+\subsubsection{Semântica Big-Step: Registros}
+
+\paragraph{Expressões}
+
+\textbf{Construção de registro:}
+
+\[
+  \infer[_{\{\mathit{New}\}}]
+  {\sigma,\Phi \vdash \mathbf{new}\; R\,\{f_1\!=\!e_1,\ldots,f_n\!=\!e_n\}
+  \Downarrow \mathbf{rec}(R,\,\{f_1 \mapsto v_1,\ldots,f_n \mapsto v_n\})}
+  {\sigma,\Phi \vdash e_1 \Downarrow v_1
+    \quad \cdots \quad
+  \sigma,\Phi \vdash e_n \Downarrow v_n}
+\]
+
+Cada campo é avaliado na ordem em que aparece na expressão.
+
+\textbf{Acesso a campo:}
+
+\[
+  \infer[_{\{\mathit{Field}\}}]
+  {\sigma,\Phi \vdash e.f \Downarrow \mathit{flds}(f)}
+  {\sigma,\Phi \vdash e \Downarrow \mathbf{rec}(R,\mathit{flds})
+  \quad f \in \mathrm{dom}(\mathit{flds})}
+\]
+
+O acesso avalia \(e\) para um valor registro e extrai o campo \(f\).
+Se \(f\) não existir, a execução trava (erro de tipo prevenido pela
+verificação de tipos).
+
+\paragraph{Comandos}
+
+\textbf{Declaração de variável:}
+
+\[
+  \infer[_{\{\mathit{Decl}\}}]
+  {\sigma,\Phi \vdash \mathbf{var}\; x \mathbin{:} \tau \mathbin{=} e
+  \Downarrow (\sigma[x \mapsto v],\; \mathbf{normal})}
+  {\sigma,\Phi \vdash e \Downarrow v}
+\]
+
+\textbf{Atribuição de campo:}
+
+\[
+  \infer[_{\{\mathit{FieldAssign}\}}]
+  {\sigma,\Phi \vdash x.f \mathbin{:=} e
+    \Downarrow (\sigma[x \mapsto \mathbf{rec}(R,\,\mathit{flds}[f
+      \mapsto v])],\;
+  \mathbf{normal})}
+  {\sigma(x) = \mathbf{rec}(R,\mathit{flds})
+  \quad \sigma,\Phi \vdash e \Downarrow v}
+\]
+
+A atribuição não aloca um novo registro: ela atualiza o registro em
+\(x\) substituindo o campo \(f\) pelo novo valor \(v\). Como a
+semântica é de valor, \(x\) recebe uma cópia modificada.
+
+\subsubsection{Semântica Big-Step: Funções}
+
+\paragraph{Propagação de \texttt{return}}
+
+Para que \haskell{return} interrompa a execução de um bloco, as
+regras de sequência precisam propagar o resultado.
+
+\textbf{Bloco vazio:}
+
+\[
+  \infer[_{\{\mathit{BlkNil}\}}]
+  {\sigma,\Phi \vdash \epsilon \Downarrow (\sigma,\; \mathbf{normal})}
+  {}
+\]
+
+\textbf{Bloco com retorno antecipado:}
+
+\[
+  \infer[_{\{\mathit{BlkRet}\}}]
+  {\sigma,\Phi \vdash s\,;\,B \Downarrow (\sigma',\; {\uparrow}\,v)}
+  {\sigma,\Phi \vdash s \Downarrow (\sigma',\; {\uparrow}\,v)}
+\]
+
+Se o primeiro comando produz um retorno, o resto do bloco \(B\) não é
+executado e o resultado é propagado imediatamente.
+
+\textbf{Bloco com continuação normal:}
+
+\[
+  \infer[_{\{\mathit{BlkCons}\}}]
+  {\sigma,\Phi \vdash s\,;\,B \Downarrow r}
+  {\sigma,\Phi \vdash s \Downarrow (\sigma',\; \mathbf{normal})
+  \quad \sigma',\Phi \vdash B \Downarrow r}
+\]
+
+\paragraph{Comandos de retorno}
+
+\textbf{Retorno com valor:}
+
+\[
+  \infer[_{\{\mathit{RetVal}\}}]
+  {\sigma,\Phi \vdash \mathbf{return}\; e \Downarrow (\sigma,\; {\uparrow}\,v)}
+  {\sigma,\Phi \vdash e \Downarrow v}
+\]
+
+\textbf{Retorno sem valor (\texttt{void}):}
+
+\[
+  \infer[_{\{\mathit{RetVoid}\}}]
+  {\sigma,\Phi \vdash \mathbf{return} \Downarrow (\sigma,\;
+  {\uparrow}\,\mathbf{unit})}
+  {}
+\]
+
+\paragraph{Chamada de função}
+
+\textbf{Chamada como expressão} (função não-\texttt{void}):
+
+\[
+  \infer[_{\{\mathit{CallExpr}\}}]
+  {\sigma,\Phi \vdash f(e_1,\ldots,e_n) \Downarrow v}
+  {
+    \Phi(f) = (\overline{x_i},\; B)
+    \quad
+    \sigma,\Phi \vdash e_i \Downarrow v_i \;\;(\forall\, i)
+    \quad
+    [x_1 \mapsto v_1,\ldots,x_n \mapsto v_n],\Phi \vdash B
+    \Downarrow (\_,\; {\uparrow}\,v)
+  }
+\]
+
+O corpo de \(f\) é executado em um \textbf{novo ambiente}
+\([x_1 \mapsto v_1,\ldots,x_n \mapsto v_n]\): apenas os parâmetros
+formais estão em escopo. O resultado \({\uparrow}\,v\) fornece o valor
+de retorno; o ambiente da chamada \(\sigma\) não é modificado.
+
+\textbf{Chamada como comando} (função \texttt{void} ou retorno descartado):
+
+\[
+  \infer[_{\{\mathit{CallStmt}\}}]
+  {\sigma,\Phi \vdash f(e_1,\ldots,e_n) \Downarrow (\sigma,\; \mathbf{normal})}
+  {
+    \Phi(f) = (\overline{x_i},\; B)
+    \quad
+    \sigma,\Phi \vdash e_i \Downarrow v_i \;\;(\forall\, i)
+    \quad
+    [x_1 \mapsto v_1,\ldots,x_n \mapsto v_n],\Phi \vdash B \Downarrow (\_,\; \_)
+  }
+\]
+
+O ambiente de chamada é devolvido inalterado: a função não pode
+alterar o estado externo através de variáveis globais mutáveis nem por
+passagem por referência.
+
+\section{Implementação em Haskell}
+
+\subsection{Expressões}
+
+A função \haskell{interpExp} retorna agora um
+\haskell{Value} (inteiro ou booleano). As novas
+equações implementam diretamente as regras semânticas:
+
+\begin{minted}{haskell}
+interpExp :: Exp -> Interp Value
+interpExp (EValue v) = pure v
+interpExp (EVar v) = askVar v
+interpExp (e1 :+: e2) = do { v1 <- interpExp e1; v2 <- interpExp e2; v1 .+. v2 }
+interpExp (e1 :*: e2) = do { v1 <- interpExp e1; v2 <- interpExp e2; v1 .*. v2 }
+interpExp (e1 :<: e2) = do { v1 <- interpExp e1; v2 <- interpExp e2; v1 .<. v2 }
+interpExp (e1 :=: e2) = do { v1 <- interpExp e1; v2 <- interpExp e2; v1 .=. v2 }
+interpExp (e1 :|: e2) = do { v1 <- interpExp e1; v2 <- interpExp e2; v1 .|. v2 }
+interpExp (ENot e) = do { v <- interpExp e; vnot v }
+\end{minted}
+
+As funções \haskell{(.+.)},
+\haskell{(.<.)}, \haskell{(.=.)},
+\haskell{(.|.)} e \haskell{vnot},
+definidas em \haskell{Utils.Value}, verificam que os
+operandos têm os tipos corretos e lançam um erro via
+\haskell{throwError} caso contrário.
+
+\subsection{Condicional}
+
+A equação para \haskell{SIf} implementa as regras
+(IfTrue) e (IfFalse):
+
+\begin{minted}{haskell}
+interpStmt (SIf e blk1 blk2) = do
+    v <- interpExp e
+    case v of
+      VBool True  -> mapM_ interpStmt blk1
+      VBool False -> mapM_ interpStmt blk2
+      _           -> throwError $ unlines
+                       ["Expecting a boolean value, but found:", pretty e]
+\end{minted}
+
+O casamento de padrões em \haskell{VBool True} e
+\haskell{VBool False} corresponde diretamente às
+premissas das regras (IfTrue) e (IfFalse). O caso
+\haskell{_} trata erros de tipo que as regras
+semânticas simplesmente não cobrem.
+
+\subsection{Repetição}
+
+A equação para \haskell{SWhile} implementa as regras
+(WhileFalse) e (WhileTrue):
+
+\begin{minted}{haskell}
+interpStmt (SWhile e blk1) = do
+    v <- interpExp e
+    case v of
+      VBool False -> pure ()
+      VBool True  -> do
+          mapM_ interpStmt blk1
+          interpStmt (SWhile e blk1)
+      _ -> throwError $ unlines
+             ["Expecting a boolean value, but found:", pretty e]
+\end{minted}
+
+A correspondência com as regras semânticas é precisa:
+
+\begin{itemize}
+  \item
+    \haskell{VBool False -> pure ()}, correspondendo à regra
+    (WhileFalse): o ambiente não muda, a execução termina sem
+    produzir nenhum efeito adicional.
+  \item
+    \haskell{VBool True -> mapM_ interpStmt blk1 >>
+    interpStmt (SWhile e blk1)}, correspondendo à regra (WhileTrue): executa o
+    bloco (\(\sigma, B \Downarrow \sigma'\)) e depois invoca
+    \haskell{interpStmt (SWhile e blk1)}
+    recursivamente (\(\sigma', \mathbf{while}\ldots \Downarrow \sigma''\)).
+\end{itemize}
+
+A recursão na implementação espelha a recursão na regra semântica: se
+o laço não terminar, a função Haskell também não terminará.
+
+\subsection{Executando o Interpretador}
+
+\begin{verbatim}
+cabal run while -- --interp --file programa.while
+\end{verbatim}
+
+Por exemplo, o seguinte programa calcula o fatorial de 5:
+
+\begin{verbatim}
+n := 5;
+acc := 1;
+while 0 < n do {
+    acc := acc * n;
+    n := n + (-1);
+}
+print acc;
+\end{verbatim}
+
+O interpretador imprime 120.
+
+\subsection{Implementação da Extensão TImp}
+
+A implementação está em \verb|TImp/Interp/TImpInterp.hs|. As regras
+semânticas apresentadas na Seção~\ref{sec:timp-big-step} têm
+correspondência direta com o código Haskell.
+
+\paragraph{Domínio de valores e estado.}
+
+\begin{minted}{haskell}
+data Value
+  = VInt    Int
+  | VBool   Bool
+  | VString String
+  | VRecord Name (Map Field Value)  -- rec(R, flds)
+  | VUnit                           -- unit
+
+data InterpState = InterpState
+  { varEnv  :: Map Var Value        -- sigma
+  , funcEnv :: Map Name FuncDecl    -- Phi
+  }
+
+type InterpM a = StateT InterpState (ExceptT String IO) a
+\end{minted}
+
+O campo \haskell{funcEnv} corresponde ao ambiente global \(\Phi\),
+construído uma vez no ponto de entrada e nunca modificado.
+
+\paragraph{Resultado de bloco.}
+
+A função \haskell{execBlock} retorna \haskell{Maybe Value},
+onde \haskell{Nothing} corresponde a \(\mathbf{normal}\) e
+\haskell{Just v} corresponde a \({\uparrow}\,v\):
+
+\begin{minted}{haskell}
+execBlock :: [Stmt] -> InterpM (Maybe Value)
+execBlock []     = pure Nothing              -- BlkNil
+execBlock (s:ss) = do
+  r <- execStmt s
+  case r of
+    Just _  -> pure r                        -- BlkRet: propagate
+    Nothing -> execBlock ss                  -- BlkCons: continue
+\end{minted}
+
+\paragraph{Registros.}
+
+A avaliação de \haskell{ENew} implementa a regra (New):
+
+\begin{minted}{haskell}
+evalExp (ENew rname initFields) = do
+  vals <- mapM (\(f, e) -> (f,) <$> evalExp e) initFields
+  pure (VRecord rname (Map.fromList vals))
+\end{minted}
+
+O acesso a campo implementa a regra (Field):
+
+\begin{minted}{haskell}
+evalExp (EField e f) = do
+  v <- evalExp e
+  case v of
+    VRecord _ fields ->
+      case Map.lookup f fields of
+        Just val -> pure val
+        Nothing  -> throwError ("Record has no field: " ++ f)
+    _ -> throwError "Field access on non-record value"
+\end{minted}
+
+A atribuição de campo implementa (FieldAssign):
+
+\begin{minted}{haskell}
+execStmt (SFieldAssign v f e) = do
+  rval <- lookupVar v
+  newVal <- evalExp e
+  case rval of
+    VRecord name fields ->
+      let fields' = Map.insert f newVal fields
+      in  modify (\st -> st
+            { varEnv = Map.insert v (VRecord name fields') (varEnv st) })
+    _ -> throwError (v ++ " is not a record")
+  pure Nothing
+\end{minted}
+
+\paragraph{Funções.}
+
+O comando \haskell{return} implementa as regras (RetVal) e (RetVoid):
+
+\begin{minted}{haskell}
+execStmt (SReturn Nothing)  = pure (Just VUnit)
+execStmt (SReturn (Just e)) = Just <$> evalExp e
+\end{minted}
+
+A chamada de função implementa as regras (CallExpr) e (CallStmt).
+A função auxiliar \haskell{callFunc} cria um novo ambiente e executa
+o corpo:
+
+\begin{minted}{haskell}
+callFunc :: Name -> [Value] -> InterpM Value
+callFunc fname argVals = do
+  fenv <- gets funcEnv
+  case Map.lookup fname fenv of
+    Nothing -> throwError ("Undefined function: " ++ fname)
+    Just (FuncDecl _ params _ body) -> do
+      let bindings = zip [v | Param v _ <- params] argVals
+      withFreshEnv bindings $ do        -- ambiente novo: sigma_0
+        r <- execBlock body
+        pure (fromMaybe VUnit r)        -- extrai v de (uparrow v)
+\end{minted}
+
+A função \haskell{withFreshEnv} salva o ambiente corrente, inicializa
+o novo ambiente com apenas os parâmetros formais e restaura o ambiente
+original ao terminar, implementando a semântica de escopo local:
+
+\begin{minted}{haskell}
+withFreshEnv :: [(Var, Value)] -> InterpM a -> InterpM a
+withFreshEnv bindings m = do
+  saved <- gets varEnv
+  modify (\st -> st { varEnv = Map.fromList bindings })
+  r <- m
+  modify (\st -> st { varEnv = saved })
+  pure r
+\end{minted}
+
+\section{Conclusão}
+
+Neste capítulo, completámos a semântica operacional de uma linguagem
+imperativa com as construções de controle de fluxo mais fundamentais:
+
+\begin{itemize}
+  \item
+    O \textbf{condicional} é modelado por duas regras simétricas,
+    (IfTrue) e (IfFalse), que selecionam o ramo a executar com base
+    no valor booleano da condição.
+  \item
+    O \textbf{laço} while é modelado por
+    (WhileFalse), que termina quando a condição é falsa, e
+    (WhileTrue), que executa o corpo e recomeça: uma regra
+    inerentemente recursiva que espelha a definição operacional
+    de repetição.
+  \item
+    Na semântica small-step, o while se
+    \textbf{desenrola} em um condicional, o que torna explícita a
+    estrutura de cada iteração.
+  \item
+    Na semântica big-step, a não-terminação corresponde à ausência de
+    uma derivação finita: a semântica é parcial por construção.
+  \item
+    \textbf{Registros} são modelados como valores estruturados
+    \(\mathbf{rec}(R, \mathit{flds})\) com semântica de cópia; as regras
+    (New), (Field) e (FieldAssign) cobrem criação, leitura e atualização.
+  \item
+    \textbf{Funções} introduzem o conceito de \textit{resultado de bloco}
+    \(r \in \{\mathbf{normal}, {\uparrow}\,v\}\) para modelar
+    \haskell{return}: as regras (BlkRet) e (BlkCons) propagam ou
+    descartam esse resultado; (CallExpr) executa a função em um novo ambiente
+    e extrai o valor retornado.
+\end{itemize}
+
+A implementação em \verb|TImp/Interp/TImpInterp.hs| segue a
+especificação semântica com precisão, confirmando que uma boa
+especificação formal é também um guia de implementação direta.

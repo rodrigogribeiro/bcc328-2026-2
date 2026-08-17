@@ -1,0 +1,231 @@
+\chapter{Introdução à análise léxica}
+
+\section{Introdução}
+
+A análise léxica é a primeira fase do processo de compilação,
+responsável por ler o código-fonte como uma sequência de caracteres e
+agrupá-los em tokens significativos - palavras reservadas,
+identificadores, operadores, números e símbolos - enquanto remove
+elementos irrelevantes como espaços em branco e comentários. Sua
+importância está em transformar o texto bruto do programa em uma
+representação estruturada que simplifica as fases subsequentes
+(análise sintática e semântica), além de detectar erros léxicos
+precocemente, como caracteres inválidos ou identificadores mal
+formados, funcionando como a ``porta de entrada'' que organiza e
+valida o string de entrada antes das demais etapas de um compilador /
+interpretador.
+
+Damos o nome de \textbf{token} a um componente indivisível
+da sintaxe de uma linguagem. De maneira simples, o conjunto de
+tokens de uma linguagem pode ser entendido como o seu alfabeto.
+
+Antes de apresentarmos a primeira técnica de análise léxica, vamos
+descrever a primeira linguagem que iremos utilizar durante o curso.
+
+\section{A linguagem Exp}
+
+Durante o curso de compiladores vamos implementar interpretadores e
+compiladores para diversas linguagens de programação. A primeira
+destas linguagens será chamada de \textbf{Exp} e está é definida pela
+seguinte gramática livre de contexto.
+
+\[
+  \begin{array}{lclclclcl}
+    E & \to & n & | & E + E & | & E * E & | & (E)
+  \end{array}
+\]
+
+De maneira simples, a linguagem \textbf{Exp} é formada por expressões
+envolvendo adição, multiplicação, parêntesis e constantes numéricas
+(representadas por \textbf{n}).
+
+O conjunto de tokens desta linguagem é dado por \{n, +, *, (, )\}. A
+próxima seção vamos apresentar a implementação de um analisador
+léxico ad-hoc para esta linguagem.
+
+\section{Analisadores léxicos ad-hoc}
+
+Um analisador léxico ad-hoc é uma implementação manual e simplificada
+de um analisador léxico, construída especificamente para um problema
+ou linguagem particular, sem utilizar geradores automáticos como o
+Alex. Diferentemente de analisadores baseados em expressões regulares
+e autômatos (tema de um próximo capítulo), o analisador ad-hoc é
+tipicamente implementado através de código que processa caracteres
+sequencialmente, utilizando estruturas como casamento de padrão para
+identificar tokens.
+
+O primeiro passo de nossa implementação é a definição de tipos para
+representação de tokens.
+
+\begin{minted}{haskell}
+type Line = Int
+type Column = Int
+
+data Token
+  = Token {
+      pos :: (Line, Column)
+    , lexeme :: Lexeme
+    }
+
+data Lexeme
+  = TNumber Int
+  | TLParen
+  | TRParen
+  | TPlus
+  | TTimes
+  | TEOF
+\end{minted}
+
+Os sinônimos \haskell{Line} e
+\haskell{Column} representam a informação de linha e
+coluna inicial de um token. Por sua vez, tipo
+\haskell{Token} é definido como um registro contendo
+dois campos: um para sua posição inicial e outro que identifica o seu
+\textbf{lexema}. O tipo \haskell{Lexeme} representa
+os diferentes tokens da linguagem com seus construtores:
+\haskell{TNumber} representa números,
+\haskell{TLParen} o abre parêntesis,
+\haskell{TRParen} o fecha parêntesis,
+\haskell{TPlus} o operador de adição,
+\haskell{TTimes} o operador de multiplicação e
+\haskell{TEOF} o final da entrada.
+
+O próximo passo para definirmos o analisador léxico para a linguagem
+\textbf{EXP} é determinar o tipo desta função. A função deverá
+receber uma string de entrada e retornar uma lista de tokens. Um
+possível tipo para essa função seria:
+
+\begin{minted}{haskell}
+lexer :: String -> [Token]
+\end{minted}
+
+Porém, como lidar com situações de erro? Por exemplo, qual seria o
+resultado se a string possuir caracteres inválidos (por exemplo,
+\textbf{a}), que não fazem parte dos possíveis tokens da linguagem? O
+ideal é que o analisador retorne uma mensagem de erro apropriada.
+Para isso, vamos modificar o tipo de \haskell{lexer} para:
+
+\begin{minted}{haskell}
+lexer :: String -> Either String [Token]
+\end{minted}
+
+para permitir a emissão de mensagens de erro.
+
+A ideia do analisador léxico é percorrer a string de entrada enquanto
+produz uma lista contendo os tokens encontrados até o momento.
+Durante o caminhamento da entrada, vamos atualizar o \emph{estado} do
+analisador léxico a cada caractere lido. O estado é definido pelo
+seguinte sinônimo:
+
+\begin{minted}{haskell}
+type State = (Line, Column, String, [Token])
+\end{minted}
+
+O tipo \haskell{State} é uma quádrupla formada pela
+linha atual, coluna atual, string de dígitos consecutivos encontrados
+até o momento e a lista de tokens já produzidos. A cada novo
+caractere processado, devemos atualizar o estado de forma apropriada.
+Para isso, utilizamos a função \haskell{transition},
+apresentada a seguir.
+
+\begin{minted}{haskell}
+transition :: State -> Char -> Either String State
+transition state@(l, col, t, ts) c
+  | c == '\n' = mkDigits state c
+  | isSpace c = mkDigits state c
+  | c == '+' = Right (l, col + 1, "", mkToken state (Token TPlus (l,col)) ++ ts)
+  | c == '*' = Right (l, col + 1, "", mkToken state (Token TMul (l,col)) ++ ts)
+  | c == '(' = Right (l, col + 1, "", mkToken state (Token TLParen (l,col)) ++ ts)
+  | c == ')' = Right (l, col + 1, "", mkToken state (Token TRParen (l,col)) ++ ts)
+  | isDigit c = Right (l, col + 1, c : t, ts)
+  | otherwise = unexpectedCharError l col c
+\end{minted}
+
+Quando encontramos parêntesis, operadores ou dígitos simplesmente
+atualizamos o estado criando um token ou adicionando o caractere de
+dígito na sequência de dígitos encontrados até o momento atual. Caso
+o caractere atual seja um espaço ou uma quebra de linha, tentamos
+construir um token de dígitos consecutivos e atualizamos a respectiva
+posição de linha / coluna. A função
+\haskell{mkDigits} realiza essa tarefa. Primeiro,
+verificamos se a string de dígitos encontrados é vazia, nesta
+situação retornamos o estado com a informação de linha / coluna
+devidamente modificada. Caso a lista de dígitos seja formada apenas
+por dígitos, criamos um novo token de dígitos e atualizamos o estado
+apropriadamente. Finalmente, caso nenhuma destas situações se
+aplique, temos um erro.
+
+\begin{minted}{haskell}
+mkDigits :: State -> Char -> Either String State
+mkDigits state@(l, col, s, ts) c
+  | null s = let l' = if c == '\n' then l + 1 else l
+                 col' = if isSpace c then col + 1 else col
+             in (l', col', s, ts)
+  | all isDigit s = let t = Token (TNumber (VInt (read $ reverse s))) (l,col)
+                        l' = if c == '\n' then l + 1 else l
+                        col' = if c /= '\n' && isSpace c then col + 1 else col
+                    in Right (l', col', "", t : ts)
+  | otherwise = unexpectedCharError l col c
+\end{minted}
+
+De posse da função de transição entre estados do analisador léxico,
+podemos definir o analisador léxico como:
+
+\begin{minted}{haskell}
+lexer :: String -> Either String [Token]
+lexer = finish . foldl step base
+  where
+    base = Right (1, 1, "", [])
+
+    finish = either Left (Right . extract)
+
+    step ac@(Left _) _ = ac
+    step (Right state) c = transition state c
+
+    extract (l, col, s, ts)
+      | null s = reverse ts
+      | otherwise = let n = read (reverse s)
+                        t = Token (TNumber (VInt n))
+                                  (l, col - (length s))
+                    in reverse (t : ts)
+\end{minted}
+
+O valor \haskell{base} é definido como a tupla
+\haskell{(1, 1, "", [])} como valor do estado inicial
+do analisador léxico formado por valores iniciais de linha, coluna e
+as listas de tokens e dígitos iniciais é vazia.
+
+A função \haskell{extract} é aplicada ao estado final
+do analisador léxico para tentar construir um token de dígitos a
+partir da sequência de dígitos consecutivos encontrados. Finalmente,
+a função \haskell{finish} realiza o casamento de
+padrão no resultado do analisar léxico: caso o resultado seja um
+erro, este é propagado e caso seja o estado final do analisador,
+aplicamos a função \haskell{extract} para obter a
+lista final de tokens da entrada.
+
+\section{Analisadores léxicos ad-hoc: vantagens e
+desvantagens}
+
+Analisadores léxicos ad-hoc possuem a vantagem de possuir uma
+implementação simples para linguagens pequenas e maior controle sobre
+erros encontrados. Porém, essa técnica possui diversas desvantagens.
+A primeira é que tais analisadores são difíceis de manter e extender,
+além de não serem eficientes para linguagens com uma estrutura léxica
+complexa. Por exemplo, como estender a implementação do analisador
+ad-hoc para prover suporte a identificadores? Como dar suporte a
+comentários de linha ou mesmo de blocos?
+
+Dessa forma, esta técnica é aplicável apenas em situações em que a
+simplicidade da implementação supera as vantagens de um analisadores
+léxicos produzidos automaticamente a partir de expressões regulares.
+
+\section{Conclusão}
+
+Neste capítulo apresentamos uma introdução à análise léxica e
+descrevemos uma implementação de um analisador léxico ad-hoc para uma
+linguagem de programação simples. Concluímos apresentando argumentos
+a favor e contra o uso deste tipo de analisadores léxicos. Nos
+próximos capítulos veremos como analisadores léxios podem ser
+produzidos automaticamente a partir da descrição de tokens como
+expressões regulares.

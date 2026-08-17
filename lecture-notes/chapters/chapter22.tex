@@ -1,0 +1,1131 @@
+\chapter{Inferência de tipos}
+
+\section{Introdução}
+
+Os capítulos anteriores apresentaram a \textbf{verificação de tipos}:
+dado um programa com anotações explícitas de tipo, decidir se ele é
+bem tipado. A verificação percorre a árvore sintática e, para cada
+nó, confirma que os tipos declarados pelo programador são
+consistentes com as regras do sistema de tipos.
+
+A \textbf{inferência de tipos} resolve um problema mais ambicioso:
+dado um programa \emph{sem} anotações, encontrar automaticamente os
+tipos mais gerais que tornam o programa bem tipado, ou reportar
+que nenhum tal conjunto de tipos existe. O programador não precisa
+anotar nada; o compilador deduz tudo.
+
+A diferença fundamental entre os dois problemas é ilustrada pela
+regra (T-Abs) do $\lambda$-cálculo simplesmente tipado:
+
+\[ \frac{\Gamma,\, x : T_1 \vdash t : T_2} {\Gamma \vdash \lambda x {:} T_1.\;
+t : T_1 \to T_2} \quad\text{(T-Abs)} \]
+
+Na verificação, \(T_1\) é fornecido pelo programador na anotação
+\(\lambda x : T_1 \). Na inferência,
+\(T_1\) é desconhecido e deve ser descoberto a partir de como \(x\) é
+usado no corpo \(t\).
+
+Este capítulo estuda a inferência de tipos para a linguagem
+\textbf{MiniML}, um núcleo funcional com inteiros, booleanos,
+lambdas e definições polimórficas. O algoritmo é baseado em
+\textbf{geração e resolução de restrições}, seguindo a abordagem
+HM(X) de Pottier e Rémy. Em vez de computar os tipos diretamente, o
+gerador de restrições produz um sistema de equações entre tipos; o
+resolvedor então encontra a substituição, um mapeamento de
+variáveis de tipo para tipos concretos, que satisfaz todas as equações.
+
+\section{A Linguagem MiniML}
+
+\subsection{Sintaxe}
+
+MiniML é um fragmento de ML com cinco construções:
+
+\[
+  \begin{array}{rcll} e & ::= & x & \text{variável} \\ & | & \ell &
+    \text{literal (inteiro ou booleano)} \\ & | & e_1\; e_2 & \text{aplicação}
+    \\ & | & \lambda x.\; e & \text{abstração (sem anotação)} \\ & | &
+    \mathbf{let}\; x = e_1\; \mathbf{in}\; e_2 & \text{def. polimórfica}
+\end{array} \]
+
+Note que as abstrações \textbf{não} carregam anotações de tipo; a
+responsabilidade de descobri-las é do inferidor.
+
+\subsection{Tipos e Esquemas}\label{tipos-e-esquemas}
+
+Os \textbf{tipos monomórficos} (monotipos) são:
+
+\[
+  \begin{array}{rcll} T & ::= & \mathbf{Int} & \text{inteiros} \\ & | &
+    \mathbf{Bool} & \text{booleanos} \\ & | & T \to T & \text{funções} \\ & | &
+    \alpha & \text{variáveis de tipo}
+\end{array} \]
+
+Os \textbf{esquemas de tipo} (tipos polimórficos) generalizam
+tipos monomórficos com quantificação universal:
+
+\[ \sigma ::= T \;\mid\; \forall \vec{\alpha}.\; T \]
+
+Escrevemos \(\forall \alpha_1 \ldots \alpha_n.\; T\) (ou simplesmente
+\(\forall \vec{\alpha}.\; T\)) para o esquema que generaliza \(T\)
+nas variáveis \(\alpha_1, \ldots, \alpha_n\). Um esquema com nenhuma
+variável quantificada, \(\forall \varepsilon.\; T\), é equivalente ao
+tipo monomórfico \(T\).
+
+Uma \textbf{substituição} é uma função finita de variáveis de tipo
+para tipos, \(S : \mathit{TVar} \rightharpoonup
+\mathit{Type}\). A sua aplicação é estendida a tipos,
+esquemas e contextos:
+
+\[
+  \begin{array}{lcl}
+    S(\alpha) & = & \left\{
+      \begin{array}{ll}
+        T & \mathrm{se}\, \alpha\mapsto T \in S \\
+        \alpha & \mathrm{caso contrário}\\
+      \end{array}
+      \right.\\
+      S(T_1 \to T_2) & = & S(T_1) \to S(T_2)\\
+      S(\forall \vec{\alpha}.\; T) & = & \forall \vec{\alpha}.\; S'(T) \quad
+      \mathrm{onde }\: S' = S \setminus \{\alpha_1, \ldots, \alpha_n\}
+    \end{array}
+  \]
+
+  A \textbf{composição} \(S_1 \circ S_2\) é definida por
+  \((S_1 \circ S_2)(\alpha) = S_1(S_2(\alpha))\).
+
+  O contexto de tipos \(\Gamma : \mathit{Var} \rightharpoonup
+  \mathit{Scheme}\) associa cada variável de programa ao seu esquema.
+  A \textbf{instanciação} de um esquema \(\forall
+  \vec{\alpha}.\; T\) substitui as variáveis
+  quantificadas por novos tipos: \([\vec{\alpha} \mapsto
+  \vec{\beta}]\, T\), onde \(\vec{\beta}\) são variáveis novas. A
+  \textbf{generalização} de um tipo \(T\) em um contexto \(\Gamma\)
+  produz o esquema \(\forall \vec{\alpha}.\; T\), onde \(\vec{\alpha} =
+  \mathrm{fv}(T) \setminus \mathrm{fv}(\Gamma)\) são as variáveis de
+  tipo livres em \(T\) mas não em \(\Gamma\).
+
+  \section{Restrições}
+
+  \subsection{Sintaxe}
+
+  A geração de restrições transforma o problema de inferência em um
+  sistema de equações entre tipos. O conjunto de restrições
+  \(\mathcal{C}\) é definido pela seguinte gramática:
+
+  \[
+    \begin{array}{rcll} C & ::= & \top & \text{restrição trivial} \\ & | & T_1
+      = T_2 & \text{equação de tipos} \\ & | & C_1 \wedge C_2 & \text{conjunção}
+      \\ & | & \exists \alpha.\; C & \text{existencial (variável
+      local)} \\ & | &
+      \mathbf{def}\; x : T\; \mathbf{in}\; C & \text{definição
+      monomórfica} \\ & | &
+      \mathbf{let}\; x : T\; [C_1]\; \mathbf{in}\; C_2 & \text{definição
+      polimórfica}
+      \\ & | & \mathbf{inst}(x,\, T) & \text{instanciação de variável} \\ & | &
+      \mathbf{instScheme}(\sigma,\, T) & \text{verificação de anotação de tipo}
+    \end{array}
+  \]
+
+  Cada construção tem um papel preciso no processo de inferência:
+
+  \begin{itemize}
+    \item
+      \(\top\) representa a ausência de restrição, qualquer
+      substituição a satisfaz.
+    \item
+      \(T_1 = T_2\) é uma equação de unificação: a solução deve associar
+      as variáveis de tipo de forma que \(T_1\) e \(T_2\) se tornem iguais.
+    \item
+      \(C_1 \wedge C_2\) exige que ambas as restrições sejam
+      satisfeitas simultaneamente.
+    \item
+      \(\exists \alpha.\; C\) introduz \(\alpha\) como uma variável de
+      tipo local, presente em \(C\) mas não visível no exterior.
+      Usado para nomear tipos intermediários.
+    \item
+      \(\mathbf{def}\; x : T\; \mathbf{in}\; C\) torna \(x\) disponível
+      em \(C\) com o tipo \(T\) (não polimórfico). Usado para
+      parâmetros de lambda.
+    \item
+      \(\mathbf{let}\; x : T\; [C_1]\; \mathbf{in}\; C_2\) primeiro
+      resolve \(C_1\) para inferir o tipo de \(x\), generaliza \(T\) em
+      um esquema, e então disponibiliza \(x\) com esse esquema
+      polimórfico em \(C_2\).
+    \item
+      \(\mathbf{inst}(x,\, T)\) exige que o tipo de \(x\) (um esquema)
+      seja instanciado e unificado com \(T\).
+    \item
+      \(\mathbf{instScheme}(\sigma,\, T)\) verifica que uma anotação de
+      tipo explícita \(\sigma\) é compatível com o tipo inferido \(T\).
+  \end{itemize}
+
+  \subsection{Semântica}
+
+  A satisfazibilidade de uma restrição é definida em relação a um
+  \textbf{par} composto por uma substituição \(S\) e um contexto
+  \(\Gamma\). Escrevemos \((S, \Gamma) \models
+  C\) para expressar que \(C\) é satisfeita.
+
+  \[ (S, \Gamma) \models \top \quad \text{sempre} \]
+
+  \[ (S, \Gamma) \models T_1 = T_2 \iff S(T_1) = S(T_2) \]
+
+  \[ (S, \Gamma) \models C_1 \wedge C_2 \iff (S, \Gamma) \models C_1 \text{ e }
+  (S, \Gamma) \models C_2 \]
+
+  \[ (S, \Gamma) \models \exists \alpha.\; C \iff \exists T.\; (S[\alpha
+  \mapsto T], \Gamma) \models C \]
+
+  \[ (S, \Gamma) \models \mathbf{def}\; x : T\; \mathbf{in}\; C \iff (S,
+  \Gamma[x \mapsto \overline{\forall \varepsilon}.\; T]) \models C \]
+
+  \[ (S, \Gamma) \models \mathbf{let}\; x : T\; [C_1]\; \mathbf{in}\; C_2
+    \iff (S, \Gamma) \models C_1 \text{ e } (S, \Gamma[x \mapsto
+  \mathrm{gen}(\Gamma, S(T))]) \models C_2 \]
+
+  \[ (S, \Gamma) \models \mathbf{inst}(x,\, T) \iff \Gamma(x) = \sigma \text{ e
+  } S(T) \text{ é instância de } S(\sigma) \]
+
+  onde \(\mathrm{gen}(\Gamma, T) = \forall \vec{\alpha}.\; T\) com
+  \(\vec{\alpha} = \mathrm{fv}(T) \setminus \mathrm{fv}(\Gamma)\). A
+  condição \(\overline{\forall \varepsilon}.\; T\) denota o esquema sem
+  variáveis quantificadas, ou seja, o monotipo \(T\).
+
+  Uma restrição \(C\) é \textbf{satisfazível} se existe algum \((S,
+  \Gamma)\) tal que \((S, \Gamma) \models C\). Uma substituição \(S\) é
+  uma \textbf{solução} de \(C\) (no contexto inicial vazio) quando
+  \((S, \emptyset) \models C\).
+
+  \subsection{Geração de Restrições}
+
+  O gerador de restrições é uma função \(\mathcal{G}(e,\, \alpha)\) que
+  recebe uma expressão \(e\) e um tipo \emph{alvo} \(\alpha\) (uma
+  nova variável de tipo que representará o tipo de \(e\)) e produz
+  uma restrição \(C\) tal que qualquer solução \(S\) de \(C\) satisfaz
+  \(S(\alpha) = T\), onde \(T\) é o tipo de \(e\) segundo o sistema de
+  tipos de Hindley-Milner.
+
+  As regras de geração são:
+
+  \[ \mathcal{G}(x,\; \alpha) \;=\; \mathbf{inst}(x,\, \alpha)
+  \quad\text{(G-Var)} \]
+
+  \[ \mathcal{G}(\ell,\; \alpha) \;=\; \alpha = \mathrm{tylit}(\ell)
+  \quad\text{(G-Lit)} \]
+
+  onde \(\mathrm{tylit}(n) = \mathbf{Int}\) e
+  \(\mathrm{tylit}(b) = \mathbf{Bool}\).
+
+  \[ \mathcal{G}(e_1\; e_2,\; \alpha) \;=\; \exists
+    \beta.\;\bigl(\mathcal{G}(e_1,\; \beta \to \alpha) \wedge \mathcal{G}(e_2,\;
+  \beta)\bigr) \quad\text{(G-App)} \]
+
+  \[ \mathcal{G}(\lambda x.\; e,\; \alpha) \;=\; \exists \beta_1.\; \exists
+    \beta_2.\; \bigl(\mathbf{def}\; x : \beta_1\; \mathbf{in}\;
+    \mathcal{G}(e,\, \beta_2)\bigr) \;\wedge\; (\alpha = \beta_1 \to \beta_2)
+  \quad\text{(G-Lam)} \]
+
+  \[ \mathcal{G}(\mathbf{let}\; x = e_1\; \mathbf{in}\; e_2,\; \alpha)
+    \;=\; \exists \beta.\; \mathbf{let}\; x : \beta\; [\mathcal{G}(e_1,\,
+  \beta)]\; \mathbf{in}\; \mathcal{G}(e_2,\, \alpha) \quad\text{(G-Let)} \]
+
+  Quando a expressão carrega uma anotação de esquema explícita
+  \(\mathbf{let}\; x : \sigma = e\_1;
+  \mathbf{in}\; e\_2\), a restrição do corpo
+  da ligação recebe a conjunção adicional
+  \(\mathbf{instScheme}(\sigma,\, \beta)\), verificando que o tipo
+  inferido é compatível com a anotação:
+
+  \[ \mathcal{G}(\mathbf{let}\; x {:} \sigma = e_1\; \mathbf{in}\; e_2,\;
+    \alpha) \;=\; \exists \beta.\; \mathbf{let}\; x : \beta\;
+    [\mathcal{G}(e_1,\, \beta) \wedge \mathbf{instScheme}(\sigma,\, \beta)]\;
+  \mathbf{in}\; \mathcal{G}(e_2,\, \alpha) \quad\text{(G-LetAnn)} \]
+
+  Para iniciar a inferência de uma expressão fechada \(e\), cria-se uma
+  nova variável \(\alpha_0\) e resolve-se a restrição:
+
+  \[ \exists \alpha_0.\; \mathcal{G}(e,\; \alpha_0) \]
+
+  A variável \(\alpha_0\) captura o tipo principal de \(e\) após a resolução.
+
+  \textbf{Exemplo.} Considere o termo \(\lambda f.\; f\;
+  \mathbf{true}\) com alvo \(\alpha_0\). Aplicando as regras:
+
+  \[ \mathcal{G}(\lambda f.\; f\; \mathbf{true},\; \alpha_0) = \exists
+    \beta_1.\; \exists \beta_2.\; \bigl(\mathbf{def}\; f : \beta_1\;
+      \mathbf{in}\; \exists \beta_3.\; \bigl(\mathcal{G}(f,\, \beta_3
+        \to \beta_2)
+    \wedge \mathcal{G}(\mathbf{true},\, \beta_3)\bigr) \bigr) \;\wedge\;
+  (\alpha_0 = \beta_1 \to \beta_2) \]
+
+  Expandindo \(\mathcal{G}(f, \beta\_3 \to \beta\_2) =
+  \mathbf{inst}(f,\, \beta\_3 \to \beta\_2)\)
+  e \(\mathcal{G}(\mathbf{true}, \beta\_3) = \beta\_3 =
+  \mathbf{Bool}\), a restrição torna-se:
+
+  \[ \exists \beta_1\, \beta_2\, \beta_3.\; \bigl(\mathbf{def}\; f :
+      \beta_1\; \mathbf{in}\; \mathbf{inst}(f,\, \beta_3 \to \beta_2) \wedge
+  \beta_3 = \mathbf{Bool}\bigr) \;\wedge\; (\alpha_0 = \beta_1 \to \beta_2) \]
+
+  A resolução força \(\beta_1 = \beta_3 \to \beta_2\), combinada com
+  \(\beta\_3 = \mathbf{Bool}\), produz
+  \(\beta_1 = \mathbf{Bool} \to \beta_2\), e o tipo final é \(\alpha_0
+  = (\mathbf{Bool} \to \beta_2) \to \beta_2\). Sem mais restrições
+  sobre \(\beta_2\), o tipo é polimórfico: \(\forall
+  \beta.; (\mathbf{Bool} \to \beta) \to \beta\).
+
+  \subsection{Subsumção e Verificação de Anotações Polimórficas}
+  \label{sec:subsumption}
+
+  A restrição \(\mathbf{instScheme}(\sigma, T)\) verifica que uma
+  anotação de tipo polimórfica \(\sigma\) é compatível com o tipo
+  inferido \(T\). Para dar a essa verificação uma semântica rigorosa,
+  introduzimos a relação de \textbf{subsumção} entre esquemas.
+
+  \begin{Definition}[Subsumção]\label{def:subsumption}
+    Sejam \(\sigma_1 = \forall \vec{\alpha}.\, T_1\) e
+    \(\sigma_2 = \forall \vec{\beta}.\, T_2\) esquemas de tipo.
+    Dizemos que \(\sigma_1\) \textbf{subsume} \(\sigma_2\), escrito
+    \(\sigma_1 \preceq \sigma_2\), se existe uma substituição \(S\) com
+    \(\mathrm{dom}(S) \subseteq \{\vec{\alpha}\}\) tal que
+    \(S(T_1) = [\vec{\beta} \mapsto \vec{\gamma}]\,T_2\) para novas variáveis
+    \(\vec{\gamma}\).  Equivalentemente, toda instância de
+    \(\sigma_2\) é também instância de \(\sigma_1\).
+  \end{Definition}
+
+  A relação \(\preceq\) é uma pré-ordem sobre esquemas que captura a
+  ideia de \emph{generalidade}: se \(\sigma_1 \preceq \sigma_2\), então
+  \(\sigma_1\) é pelo menos tão geral quanto \(\sigma_2\).
+
+  \begin{example}
+    \begin{enumerate}
+      \item \(\forall \alpha.\, \alpha \to \alpha \;\preceq\;
+        \mathbf{Int} \to \mathbf{Int}\): o esquema da identidade
+        subsume sua especialização inteira via
+        \([\alpha \mapsto \mathbf{Int}]\).
+      \item \(\forall \alpha.\, \alpha \to \alpha \;\preceq\;
+        \forall \alpha.\, \alpha \to \alpha\): todo esquema subsume a
+        si mesmo (reflexividade).
+      \item \(\forall \alpha.\, \alpha \to \alpha \;\not\preceq\;
+        \forall \alpha.\, \alpha \to \mathbf{Bool}\): não existe
+        substituição para \(\alpha\) tal que \(\alpha \to \alpha\)
+        se torne \(\alpha' \to \mathbf{Bool}\) para \(\alpha'\)
+        arbitrário.
+    \end{enumerate}
+  \end{example}
+
+  \subsubsection*{Subsumção e Anotações de Tipo}
+
+  Quando o programador escreve
+  \(\mathbf{let}\; x {:} \sigma_{\mathit{ann}} = e_1\; \mathbf{in}\; e_2\),
+  a anotação é válida se e somente se o tipo principal inferido para
+  \(e_1\) é pelo menos tão geral quanto a anotação. A semântica correta
+  da restrição \(\mathbf{instScheme}\) é portanto:
+
+  \[
+    (S, \Gamma) \models \mathbf{instScheme}(\sigma_{\mathit{ann}},\, T)
+    \iff \mathrm{gen}(\Gamma, S(T)) \preceq \sigma_{\mathit{ann}}
+  \]
+
+  \begin{remark}
+    A direção \(\sigma_{\mathit{inf}} \preceq \sigma_{\mathit{ann}}\)
+    permite que o programador \emph{restrinja} o tipo inferido a uma
+    instância mais específica, mas não que lhe atribua um esquema que o
+    inferidor não consegue produzir.  Anotar \(\lambda x.\, x\) com
+    \(\mathbf{Int} \to \mathbf{Int}\) é válido (restrição de
+    \(\forall \alpha.\, \alpha \to \alpha\)); anotar com
+    \(\forall \alpha.\, \alpha \to \mathbf{Bool}\) é inválido.
+  \end{remark}
+
+  \subsubsection*{Algoritmo de Verificação de Subsumção}
+
+  Para verificar \(\sigma_1 \preceq \sigma_2\) algoritmicamente, usamos
+  \textbf{variáveis de Skolem} (variáveis rígidas) — variáveis que o
+  unificador não pode instanciar.
+
+  \begin{enumerate}
+    \item Renomeie as variáveis quantificadas de
+      \(\sigma_2 = \forall \vec{\beta}.\, T_2\) com novas variáveis
+      \textbf{rígidas} \(\vec{\gamma}\):
+      \(T_2' = [\vec{\beta} \mapsto \vec{\gamma}]\, T_2\).
+      As \(\vec{\gamma}\) representam ``escolhas arbitrárias'' do chamador.
+    \item Instancie \(\sigma_1 = \forall \vec{\alpha}.\, T_1\) com
+      novas variáveis
+      \textbf{flexíveis} \(\vec{\delta}\):
+      \(T_1' = [\vec{\alpha} \mapsto \vec{\delta}]\, T_1\).
+    \item Unifique \(T_1'\) com \(T_2'\). Falha de unificação implica
+      falha de subsumção.
+    \item Verifique que nenhuma variável rígida \(\vec{\gamma}\) aparece
+      no domínio da substituição resultante.  Se alguma aparecer, a
+      subsumção falha: o esquema \(\sigma_1\) precisou restringir variáveis
+      que o chamador devia poder escolher livremente.
+  \end{enumerate}
+
+  \section{O Resolvedor de Restrições}
+
+  O resolvedor percorre a restrição em profundidade, mantendo duas
+  estruturas de estado: a \textbf{substituição acumulada} \(S\) e o
+  \textbf{contexto de tipos} \(\Gamma\). A cada etapa, a substituição é
+  refinada por unificação, e o contexto é estendido por definições e ligações.
+
+  \subsection{Unificação}
+
+  O núcleo do resolvedor é o algoritmo de \textbf{unificação de
+  Robinson}. Dado dois tipos \(T_1\) e \(T_2\), a unificação tenta
+  encontrar uma substituição \(S\) tal que \(S(T_1) = S(T_2)\). O
+  algoritmo mais geral (\(\mathrm{mgu}\)) produz o \textbf{unificador
+  mais geral} (most general unifier):
+
+  \[
+    \begin{array}{rcll} \mathrm{mgu}(\alpha, \alpha) & = & \varepsilon &
+      \text{variável consigo mesma} \\ \mathrm{mgu}(\alpha, T) & = &
+      [\alpha \mapsto
+      T] & \text{se } \alpha \notin \mathrm{fv}(T) \\ \mathrm{mgu}(T,
+      \alpha) & = &
+      [\alpha \mapsto T] & \text{se } \alpha \notin \mathrm{fv}(T) \\
+      \mathrm{mgu}(T_1 \to T_2,\; T_1' \to T_2') & = & S_2 \circ S_1 &
+      \text{onde }
+      S_1 = \mathrm{mgu}(T_1, T_1'),\; S_2 = \mathrm{mgu}(S_1(T_2),
+      S_1(T_2')) \\
+      \mathrm{mgu}(T, T) & = & \varepsilon & \text{tipos concretos iguais} \\
+      \mathrm{mgu}(T_1, T_2) & = & \text{erro} & \text{caso contrário}
+  \end{array} \]
+
+  A condição \(\alpha \notin \mathrm{fv}(T)\) é o \textbf{occurs
+  check}: ela evita a criação de tipos recursivos infinitos como
+  \(\alpha = \alpha \to \alpha\). Se o occurs check falhar, a restrição
+  não tem solução.
+
+  \subsection{O Algoritmo de Resolução}
+
+  O algoritmo \(\mathrm{solve}(C)\) percorre \(C\) recursivamente:
+
+  \[
+    \begin{array}{rcl} \mathrm{solve}(\top) & = & \text{sucesso} \\
+      \mathrm{solve}(T_1 = T_2) & = & \text{unifica } T_1 \text{ com } T_2,\;
+      \text{estende } S \\ \mathrm{solve}(C_1 \wedge C_2) & = &
+      \mathrm{solve}(C_1);\; \mathrm{solve}(C_2) \\ \mathrm{solve}(\exists
+      \alpha.\; C) & = & \text{gera } \alpha \text{ é uma nova variável};\;
+      \mathrm{solve}(C\,[\alpha]) \\ \mathrm{solve}(\mathbf{def}\; x : T\;
+      \mathbf{in}\; C) & = & \text{estende } \Gamma \text{ com } x : T;\;
+      \mathrm{solve}(C);\; \text{remove } x \text{ de } \Gamma \\
+      \mathrm{solve}(\mathbf{let}\; x : T\; [C_1]\; \mathbf{in}\; C_2) & = &
+      \mathrm{solve}(C_1);\; \sigma \leftarrow \mathrm{gen}(\Gamma, S(T));\;
+      \text{estende } \Gamma \text{ com } x : \sigma;\; \mathrm{solve}(C_2) \\
+      \mathrm{solve}(\mathbf{inst}(x,\, T)) & = & \sigma \leftarrow
+      \Gamma(x);\; T'
+      \leftarrow \mathrm{instancia}(\sigma);\; \mathrm{solve}(T = T') \\
+      \mathrm{solve}(\mathbf{instScheme}(\sigma,\, T)) & = &
+      \sigma_{\mathit{inf}} \leftarrow \mathrm{gen}(\Gamma, S(T));\;
+      \mathrm{subsume}(\sigma_{\mathit{inf}},\, \sigma)
+  \end{array} \]
+
+  A função auxiliar \(\mathrm{subsume}(\sigma_{\mathit{inf}},
+  \sigma_{\mathit{ann}})\)
+  implementa o algoritmo de verificação de subsumção descrito na
+  Seção~\ref{sec:subsumption}: gera variáveis rígidas para
+  \(\sigma_{\mathit{ann}}\), instancia \(\sigma_{\mathit{inf}}\) com variáveis
+  flexíveis, unifica os corpos e verifica que nenhuma variável rígida foi
+  instanciada.  Se a verificação falha, a anotação é incompatível com o tipo
+  principal inferido.
+
+  O tratamento de \(\mathbf{let}\) é o coração do \textbf{polimorfismo
+  de let}: após resolver \(C_1\), o tipo \(T\) da variável \(x\) já foi
+  parcialmente determinado pela substituição acumulada \(S\). A
+  generalização \(\mathrm{gen}(\Gamma, S(T))\) quantifica
+  universalmente as variáveis livres em \(S(T)\) que não ocorrem no
+  contexto \(\Gamma\) (i.e., que não são ``comprometidas'' por
+  dependências externas). O resultado é um esquema polimórfico que
+  permite a \(x\) ser usado com diferentes instâncias em \(C_2\).
+
+  A subtleza da regra para \(\mathbf{inst}\) está na
+  \textbf{instanciação}: o esquema \(\sigma = \forall \vec{\alpha}.\;
+  T'\) de \(x\) é instanciado substituindo \(\vec{\alpha}\) por
+  novas variáveis \(\vec{\beta}\) antes da unificação com \(T\). Isso
+  permite que usos distintos de \(x\) em diferentes partes do programa
+  recebam instâncias diferentes do esquema.
+
+  \section{Correção do Algoritmo de Inferência}
+
+  \subsection{Enunciados}
+
+  Sejam \(e\) uma expressão fechada e \(\alpha_0\) uma nova variável de tipo.
+  Defina \(C_e = \exists \alpha_0.\; \mathcal{G}(e, \alpha_0)\).
+
+  \textbf{Teorema (Correção).} Se o resolvedor aceita \(C_e\) com
+  substituição final \(S\), então \(\vdash e : S(\alpha_0)\).
+
+  Em outras palavras: o tipo produzido pela inferência é um tipo válido
+  para \(e\) segundo as regras de tipagem de Hindley-Milner.
+
+  \textbf{Teorema (Completude).} Se \(\Gamma \vdash e : T\) para algum
+  \(\Gamma\) e \(T\), então \(C_e\) é satisfazível e o resolvedor
+  aceita \(C_e\), produzindo um tipo \(S(\alpha_0)\) tal que \(T\) é
+  instância de \(S(\alpha_0)\).
+
+  Em outras palavras: se \(e\) é tipável, o algoritmo encontra um tipo,
+  e esse tipo é o \textbf{tipo principal}, o mais geral possível.
+
+  \textbf{Teorema (Tipo Principal).} Para qualquer expressão fechada
+  tipável \(e\), existe um esquema de tipo principal \(\sigma\) tal que:
+
+  \begin{enumerate}
+    \item
+      \(\vdash e : T\) para todo tipo \(T\) que é instância de \(\sigma\).
+    \item
+      Para todo \(T'\) tal que \(\vdash e : T'\), \(T'\) é instância de
+      \(\sigma\).
+  \end{enumerate}
+
+  O tipo produzido pelo algoritmo, após generalizar \(S(\alpha_0)\),
+  é exatamente esse tipo principal.
+
+  \subsection{Esboços de Demonstração}
+
+  \subsubsection{Correção}
+
+  A demonstração é por indução sobre a estrutura da expressão \(e\),
+  mostrando que se \(S \models \mathcal{G}(e, \alpha)\), então \(\vdash
+  e : S(\alpha)\).
+
+  \textbf{Caso (G-Var), \(e = x\):} A restrição é \(\mathbf{inst}(x,
+  \alpha)\). O resolvedor instancia o esquema \(\sigma = \Gamma(x)\)
+  com novas variáveis e unifica com \(\alpha\). Logo \(S(\alpha)\) é
+  uma instância de \(\sigma\), e a regra (T-Var) do sistema de tipos dá
+  \(\Gamma \vdash x : S(\alpha)\).
+
+  \textbf{Caso (G-Lit), \(e = \ell\):} A restrição
+  \(\alpha = \mathrm{tylit}(\ell)\) é
+  satisfeita se e somente se \(S(\alpha) =
+  \mathrm{tylit}(\ell)\). As regras (T-Int) e (T-Bool)
+  fornecem imediatamente \(\vdash \ell : \mathrm{tylit}(\ell)\).
+
+  \textbf{Caso (G-App), \(e = e_1\; e_2\):} A restrição é
+  \(\exists \beta.\;
+    \mathcal{G}(e\_1,\, \beta \to \alpha) \wedge
+  \mathcal{G}(e\_2,\, \beta)\). Por hipótese
+  de indução: \(\vdash e\_1 : S(\beta \to \alpha) =
+  S(\beta) \to S(\alpha)\) e \(\vdash e_2 : S(\beta)\). A
+  regra (T-App) conclui \(\vdash e\_1\; e\_2
+  : S(\alpha)\).
+
+  \textbf{Caso (G-Lam), \(e = \lambda x.\; t\):} A restrição introduz
+  \(\beta\_1, \beta\_2\) novos, define \(x
+  : \beta_1\) no contexto, e exige \(\mathcal{G}(t, \beta_2) \wedge
+  (\alpha = \beta_1 \to \beta_2)\). Após a resolução, \(S(\alpha) =
+  S(\beta_1) \to S(\beta_2)\). Por hipótese de indução (com \(x :
+  S(\beta_1)\) no contexto): \(x : S(\beta\_1) \vdash t :
+  S(\beta\_2)\). A regra (T-Abs) conclui
+  \(\vdash \lambda x.\; t : S(\beta\_1) \to
+  S(\beta\_2)\).
+
+  \textbf{Caso (G-Let), \(e = \mathbf{let}\; x = e_1\; \mathbf{in}\;
+  e_2\):} A restrição é \(\mathbf{let}\; x :
+    \beta\; {[}\mathcal{G}(e\_1, \beta){]}\;
+  \mathbf{in}\; \mathcal{G}(e\_2, \alpha)\).
+  Após resolver \(\mathcal{G}(e\_1, \beta)\),
+  o resolvedor generaliza \(S(\beta)\) em \(\sigma =
+  \mathrm{gen}(\Gamma, S(\beta))\). Por hipótese de
+  indução: \(\vdash e\_1 : S(\beta)\). A
+  generalização produz o esquema mais geral; por hipótese de indução
+  aplicada a \(e_2\) com \(x : \sigma\) no contexto: \(x :
+  \sigma \vdash e\_2 : S(\alpha)\). A regra (T-Let) conclui.
+
+  \subsubsection{Completude}
+
+  A demonstração vai na direção oposta: dado que \(\Gamma \vdash e :
+  T\), mostramos que o algoritmo encontra uma solução.
+
+  A chave é a \textbf{propriedade de principalidade da unificação}: o
+  algoritmo de Robinson sempre produz o unificador mais geral quando
+  uma solução existe. Isso implica que, se \(T\) é um tipo válido para
+  \(e\), então o tipo inferido \(S(\alpha_0)\) é ``mais geral que
+  \(T\)'': existe uma substituição \(R\) tal que \(R(S(\alpha_0)) = T\).
+
+  Por indução sobre a derivação de \(\Gamma \vdash e : T\):
+
+  \begin{itemize}
+    \item
+      Para cada regra de tipagem, a regra de geração correspondente
+      cria exatamente as equações que a regra de tipagem exige. Como o
+      unificador de Robinson é completo (encontra solução se ela
+      existir), as equações geradas para os subtermos são satisfazíveis.
+    \item
+      O tratamento do \(\mathbf{let}\) usa a generalização, que produz
+      exatamente o esquema mais geral: generaliza todas as variáveis
+      ``livres'' que não dependem do contexto externo, garantindo que
+      qualquer instância usada no corpo seja derivável.
+  \end{itemize}
+
+  A demonstração completa requer lemas auxiliares sobre a preservação
+  da satisfatibilidade pela composição de substituições e pela extensão
+  de contextos, que seguem de propriedades padrão da unificação.
+
+  \section{Eliminação de Tipos}
+
+  A inferência de tipos produz, além do tipo principal de uma expressão,
+  uma árvore sintática \emph{elaborada} cujos nós carregam anotações de
+  tipo. Essas anotações são indispensáveis durante a análise estática, mas
+  são desnecessárias em tempo de execução: em sistemas do estilo
+  Hindley-Milner, os tipos não influenciam a semântica operacional. A
+  \textbf{eliminação de tipos} (\emph{type erasure}) é a operação que
+  remove todas as anotações, traduzindo a expressão elaborada de volta para
+  o $\lambda$-cálculo não tipado. Isso permite reutilizar integralmente o
+  \emph{pipeline} de compilação do $\lambda$-cálculo para código de máquina.
+
+  \subsection{A Função de Eliminação}
+
+  A eliminação de tipos é definida como uma função \(\lfloor \cdot \rfloor :
+  \mathit{TyExp} \to \mathit{Term}\) que descarta as anotações de tipo e
+  preserva a estrutura computacional do termo.
+
+  \[
+    \begin{array}{rcl}
+      \lfloor x : T \rfloor & = & x \\[4pt]
+      \lfloor \ell : T \rfloor & = & \ell \\[4pt]
+      \lfloor (te_1\; te_2) : T \rfloor & = & \lfloor te_1 \rfloor\;
+      \lfloor te_2 \rfloor \\[4pt]
+      \lfloor (\lambda x {:} T_1.\; te) : T \rfloor & = & \lambda x.\;
+      \lfloor te \rfloor \\[4pt]
+      \lfloor \mathbf{let}\; x = te_1\; \mathbf{in}\; te_2 : T \rfloor & = &
+      (\lambda x.\; \lfloor te_2 \rfloor)\; \lfloor te_1 \rfloor
+    \end{array}
+  \]
+
+  Os quatro primeiros casos são diretos: variáveis, literais, aplicações e
+  abstrações perdem apenas as anotações de tipo, mantendo a mesma estrutura
+  de árvore. O caso do \haskell{let} merece atenção especial.
+
+  \textbf{Eliminação do \texttt{let}.} A construção \(\mathbf{let}\; x =
+  te_1\; \mathbf{in}\; te_2\) não existe no $\lambda$-cálculo não tipado. A
+  eliminação a traduz para um \textbf{beta-redex}: \((\lambda x.\; \lfloor
+  te_2 \rfloor)\; \lfloor te_1 \rfloor\). Isso é semanticamente correto
+  porque, pela regra beta, \((\lambda x.\; t_2)\; t_1 \leadsto
+  [x \mapsto t_1]\, t_2\), que corresponde exatamente à semântica do
+  \haskell{let}. A diferença entre \haskell{let} e lambda é, portanto,
+  unicamente estática: o sistema de tipos trata \(\mathbf{let}\) com
+  generalização (polimorfismo de let), mas a semântica de ambas as formas é
+  idêntica após a eliminação.
+
+  \subsection{Propriedades da Eliminação}
+
+  A principal propriedade da eliminação de tipos é a
+  \textbf{preservação semântica}: avaliar o termo tipado e apagar as
+  anotações do resultado produz o mesmo valor que apagar as anotações
+  primeiro e avaliar o termo não tipado.
+
+  Para enunciar este teorema precisamos relacionar os valores tipados com
+  os valores não tipados. Seja \(\lfloor v \rfloor\) a extensão natural de
+  \(\lfloor \cdot \rfloor\) a valores: \(\lfloor n \rfloor = n\),
+  \(\lfloor b \rfloor = b\), e \(\lfloor \langle \lambda x.\; te,\, \rho
+    \rangle \rfloor = \langle \lambda x.\; \lfloor te \rfloor,\, \lfloor
+  \rho \rfloor \rangle\), onde \(\lfloor \rho \rfloor\) apaga as anotações
+  em cada valor do ambiente.
+
+  \begin{Theorem}[Preservação semântica da eliminação]
+    Sejam \(te\) uma expressão elaborada fechada e \(v\) um valor tipado.
+    Se \(\,te \Downarrow v\) na semântica tipada, então \(\lfloor te
+    \rfloor \Downarrow \lfloor v \rfloor\) na semântica do $\lambda$-cálculo
+    não tipado.
+  \end{Theorem}
+
+  A demonstração é por indução sobre a derivação de \(te \Downarrow v\). Os
+  casos de variável, literal, abstração e aplicação são imediatos da
+  correspondência estrutural entre as duas semânticas. O caso do
+  \haskell{let} segue do fato de que a semântica tipada avalia \(te_1\)
+  em \(v_1\) e então \([x \mapsto v_1]\,te_2\) em \(v\), enquanto o
+  beta-redex avalia \(\lfloor te_1 \rfloor\) em \(\lfloor v_1 \rfloor\) e
+  depois \([x \mapsto \lfloor v_1 \rfloor]\,\lfloor te_2 \rfloor\) em
+  \(\lfloor v \rfloor\), que coincide com a hipótese de indução.
+
+  Uma consequência imediata é que a eliminação de tipos é segura: nenhuma
+  informação computacionalmente relevante é perdida. Os tipos existem
+  exclusivamente para a análise estática e, uma vez que o programa é
+  considerado bem tipado, podem ser completamente descartados.
+
+  \section{Implementação em Haskell}
+
+  A implementação da inferência de tipos para MiniML divide-se em cinco
+  módulos: a representação de tipos e esquemas
+  (\haskell{Type.hs}), a linguagem de restrições
+  (\haskell{Constraint.hs}), o gerador de restrições
+  (\haskell{ConstraintGen.hs}), o resolvedor
+  (\haskell{Solver.hs}), e o módulo de elaboração
+  (\haskell{ElabGen.hs}), que produz simultaneamente
+  restrições e árvores tipadas.
+
+  \subsection{Tipos e Esquemas}
+
+  O módulo \haskell{Type.hs} representa tipos e substituições:
+
+\begin{minted}{haskell}
+data Type
+  = TInt
+  | TBool
+  | TFun Type Type
+  | TVar Name
+
+data Scheme = Forall [Name] Type
+
+type Subst = Map Name Type
+
+-- Composição de substituições
+(@@) :: Subst -> Subst -> Subst
+s1 @@ s2 = Map.map (apply s1) s2 `Map.union` s1
+\end{minted}
+
+  A classe \haskell{Apply} define a aplicação de
+  substituições a qualquer estrutura que contenha variáveis de tipo:
+
+\begin{minted}{haskell}
+class Apply a where
+  ftv   :: a -> Set Name
+  apply :: Subst -> a -> a
+
+instance Apply Type where
+  apply s (TVar n) = maybe (TVar n) id (Map.lookup n s)
+  apply s (TFun t1 t2) = TFun (apply s t1) (apply s t2)
+  apply _ t = t
+
+instance Apply Scheme where
+  apply s (Forall vs t) = Forall vs (apply s' t)
+    where s' = Map.filterWithKey (\v _ -> v `notElem` vs) s
+\end{minted}
+
+  \subsection{Restrições}
+
+  O módulo \haskell{Constraint.hs} representa a
+  linguagem de restrições como um tipo de dados Haskell, correspondendo
+  diretamente à gramática da seção anterior:
+
+\begin{minted}{haskell}
+data Constraint
+  = CTrue
+  | Type :=: Type
+  | Constraint :&: Constraint
+  | CExists (Type -> Constraint)
+  | CDef Name Type Constraint
+  | CLet Name Type Constraint Constraint
+  | CInst Name Type
+  | CInstScheme Scheme Type
+\end{minted}
+
+  O construtor \haskell{CExists} usa uma \textbf{função
+  de ordem superior} para representar o escopo existencial: em vez de
+  nomear explicitamente a variável, recebe uma função
+  \haskell{Type -> Constraint} que, ao ser aplicada a
+  um tipo, produz a restrição interna. Isso evita a necessidade
+  de gerenciar nomes de variáveis na gramática de restrições e delega a
+  criação de novas variáveis ao resolvedor.
+
+  \subsection{O Gerador de Restrições}
+
+  O módulo \haskell{ConstraintGen.hs} implementa a
+  função \(\mathcal{G}(e, \alpha)\) descrita na seção anterior. Cada
+  equação corresponde a uma regra de geração:
+
+\begin{minted}{haskell}
+generator :: Exp -> Type -> Constraint
+generator (Var n) ty = CInst n ty
+generator (Lit l) ty = ty :=: typeOfLit l
+generator (App e1 e2) ty
+  = CExists (\ty' ->
+      generator e1 (TFun ty' ty) :&: generator e2 ty')
+generator (Lam x mt body) ty
+  = CExists (\t1 -> CExists (\t2 ->
+      let cBody = generator body t2
+          cBase = CDef x t1 cBody :&: (ty :=: TFun t1 t2)
+      in maybe cBase (\t -> cBase :&: (t :=: t1)) mt))
+generator (Let n mAnn e body) ty
+  = CExists (\t1 ->
+      let c1    = generator e t1
+          c1Ann = maybe c1 (\sch -> c1 :&: CInstScheme sch t1) mAnn
+          cBody = generator body ty
+      in CLet n t1 c1Ann cBody)
+\end{minted}
+
+  O ponto de entrada cria a variável raiz \(\alpha_0\) via
+  \haskell{CExists} e invoca o resolvedor:
+
+\begin{minted}{haskell}
+infer :: Exp -> Either String (Constraint, Env, Type)
+infer e
+  = let c = CExists (\t -> generator e t)
+    in case solver c of
+         Left err       -> Left err
+         Right (env, t) -> Right (c, env, t)
+\end{minted}
+
+  \subsection{O Resolvedor}
+
+  O módulo \haskell{Solver.hs} implementa
+  \(\mathrm{solve}(C)\) na mônada \haskell{Solve = ExceptT String
+  (State Env)}, onde \haskell{Env}
+  mantém a substituição acumulada, o contexto de tipos, um contador
+  para novas variáveis e um registro dos esquemas inferidos para
+  ligações \haskell{let}.
+
+\begin{minted}{haskell}
+solve :: Constraint -> Solve ()
+solve CTrue = pure ()
+solve (t1 :=: t2) = do
+    s  <- askSubst
+    s' <- mgu (apply s t1) (apply s t2)
+    extSubst s'
+solve (c1 :&: c2) = solve c1 >> solve c2
+solve (CExists c) = do
+    v <- freshTyVar
+    solve (c v)
+solve (CDef x t c) =
+    withLocalCtx x (Forall [] t) (solve c)
+solve (CLet x t c1 c2) = do
+    solve c1
+    scheme <- generalize t
+    addInferedType x scheme
+    withLocalCtx x scheme (solve c2)
+solve (CInst x t) = do
+    t' <- lookupVar x
+    solve (t :=: t')
+solve (CInstScheme sigma inf) = do
+    s      <- askSubst
+    sigInf <- generalize (apply s inf)
+    subsumes sigInf sigma
+\end{minted}
+
+  O caso \haskell{CInstScheme} agora delega diretamente a
+  \haskell{subsumes}: primeiro generaliza o tipo inferido \haskell{inf}
+  (após aplicar a substituição acumulada) para obter o esquema principal
+  \haskell{sigInf}, e então verifica se \haskell{sigInf} subsume a
+  anotação \haskell{sigma}.  Esta implementação é tanto correta (não
+  rejeita anotações válidas que restrinjam o tipo inferido) quanto
+  robusta (não depende de comparação de nomes de variáveis).
+
+  A função \haskell{generalize} implementa
+  \(\mathrm{gen}(\Gamma, S(T))\):
+
+\begin{minted}{haskell}
+generalize :: Type -> Solve Scheme
+generalize t = do
+    env  <- askEnv
+    s    <- askSubst
+    modify (\c -> c{ctx = apply s (ctx c)})
+    let t1   = apply s t
+        vars = Set.toList (Set.difference (ftv t1) (free env))
+    pure (Forall vars t1)
+\end{minted}
+
+  As variáveis quantificadas são exatamente
+  \(\mathrm{fv}(S(T)) \setminus \mathrm{fv}(\Gamma)\).
+
+  A unificação de Robinson é implementada por \haskell{mgu}:
+
+\begin{minted}{haskell}
+mgu :: Type -> Type -> Solve Subst
+mgu t1@(TVar v) t
+  | t1 == t = pure Map.empty
+  | occurs v t = throwError "Occurs check failed"
+  | otherwise = pure (Map.singleton v t)
+mgu t (TVar v) = mgu (TVar v) t
+mgu (TFun l r) (TFun l' r') = do
+    s1 <- mgu l l'
+    s2 <- mgu (apply s1 r) (apply s1 r')
+    pure (s2 @@ s1)
+mgu t1 t2
+  | t1 == t2 = pure Map.empty
+  | otherwise = throwError ("Cannot unify: " ++ show t1 ++ " != " ++ show t2)
+\end{minted}
+
+  A função \haskell{subsumes} implementa o algoritmo de verificação de
+  subsumção da Seção~\ref{sec:subsumption}. Ela recebe dois esquemas e
+  verifica se o primeiro subsume o segundo, lançando um erro caso contrário:
+
+\begin{minted}{haskell}
+-- Verifica sigma1 <= sigma2 (sigma1 e pelo menos tao geral que sigma2)
+subsumes :: Scheme -> Scheme -> Solve ()
+subsumes (Forall as t1) (Forall bs t2) = do
+    -- Passo 1: renomeia variaveis de sigma2 como variaveis rigidas
+    rigidTs <- mapM (\_ -> freshTyVar) bs
+    let rigidMap  = Map.fromList (zip bs rigidTs)
+        t2'       = apply rigidMap t2
+        rigidNms  = Set.fromList [v | TVar v <- rigidTs]
+    -- Passo 2: instancia sigma1 com variaveis flexiveis
+    flexTs <- mapM (\_ -> freshTyVar) as
+    let flexMap = Map.fromList (zip as flexTs)
+        t1'     = apply flexMap t1
+    -- Passo 3: unificacao
+    s <- mgu t1' t2'
+    -- Passo 4: nenhuma variavel rigida pode ter sido instanciada
+    let constrained = Map.keysSet s `Set.intersection` rigidNms
+    unless (Set.null constrained) $
+        throwError "Falha de subsumcao: variavel rigida foi instanciada"
+\end{minted}
+
+  O uso de \textbf{variáveis rígidas} para os quantificadores de
+  \(\sigma_2\) é a peça central: ao proibir que o unificador as instancie,
+  estamos verificando que \(\sigma_1\) consegue se adaptar a
+  \emph{qualquer} instância de \(\sigma_2\), não apenas a uma específica.
+
+  \subsection{Árvores Tipadas e Elaboração}
+
+  Uma limitação do pipeline acima é que o resultado da inferência é
+  apenas um tipo: a árvore sintática original permanece sem anotações.
+  Para produzir uma \textbf{árvore tipada} onde cada nó carrega o seu tipo.
+
+  A ideia central é que o gerador produz, além da restrição, uma árvore
+  tipada com \textbf{variáveis de tipo como marcadores de posição}.
+  Após a resolução, a aplicação da substituição final substitui todos
+  os marcadores pelos tipos concretos. Dessa forma,
+  a árvore tipada é construída composicionalmente durante a geração,
+  sem precisar aguardar os resultados do resolvedor; o resolvedor opera
+  independentemente; e a substituição final conecta os dois.
+
+  \subsubsection{A Árvore Tipada}
+
+  O módulo \haskell{TyExp.hs} define a árvore de
+  sintaxe abstrata com anotações de tipo em cada nó:
+
+\begin{minted}{haskell}
+data TyExp
+  = TEVar  Name  Type
+  | TELit  Lit   Type
+  | TEApp  TyExp TyExp  Type
+  | TELam  Name  Type   TyExp  Type
+  | TELet  Name  TyExp  TyExp  Type
+\end{minted}
+
+  Como \haskell{TyExp} contém tipos em cada nó, a
+  classe \haskell{Apply} pode ser instanciada para ela,
+  permitindo que a substituição final seja aplicada à árvore inteira de
+  uma só vez:
+
+\begin{minted}{haskell}
+instance Apply TyExp where
+  apply s (TEVar n t) = TEVar n (apply s t)
+  apply s (TELit l t) = TELit l (apply s t)
+  apply s (TEApp e1 e2 t) = TEApp (apply s e1) (apply s e2) (apply s t)
+  apply s (TELam x t1 e t) = TELam x (apply s t1) (apply s e) (apply s t)
+  apply s (TELet n e1 e2 t) = TELet n (apply s e1) (apply s e2) (apply s t)
+\end{minted}
+
+  \subsubsection{O Gerador de Elaboração}
+
+  O módulo \haskell{ElabGen.hs} reimplementa o gerador
+  de restrições em uma mônada \haskell{State Int} que
+  aloca novas variáveis \textbf{durante a geração} (em vez de delegar
+  ao resolvedor via \haskell{CExists}). As variáveis
+  geradas recebem nomes \(a\_0, a\_1,
+  \ldots\) para não conflitar com as variáveis \(v_0, v_1,
+  \ldots\) do resolvedor.
+
+\begin{minted}{haskell}
+type ElabM = State Int
+
+freshVar :: ElabM Type
+freshVar = do { n <- get; modify (+1); return (TVar ("a" ++ show n)) }
+
+elaborate :: Exp -> Type -> ElabM (Constraint, TyExp)
+elaborate (Var n) ty
+  = return (CInst n ty, TEVar n ty)
+elaborate (Lit l) ty
+  = return (ty :=: typeOfLit l, TELit l ty)
+elaborate (App e1 e2) ty = do
+    ty' <- freshVar
+    (c1, te1) <- elaborate e1 (TFun ty' ty)
+    (c2, te2) <- elaborate e2 ty'
+    return (c1 :&: c2, TEApp te1 te2 ty)
+elaborate (Lam x mt body) ty = do
+    t1 <- freshVar
+    t2 <- freshVar
+    (cBody, teBody) <- elaborate body t2
+    let cBase = CDef x t1 cBody :&: (ty :=: TFun t1 t2)
+        cAnn  = maybe cBase (\t -> cBase :&: (t :=: t1)) mt
+    return (cAnn, TELam x t1 teBody ty)
+elaborate (Let n mAnn e body) ty = do
+    t1 <- freshVar
+    (c1, te1)       <- elaborate e t1
+    let c1Ann = maybe c1 (\sch -> c1 :&: CInstScheme sch t1) mAnn
+    (cBody, teBody) <- elaborate body ty
+    return (CLet n t1 c1Ann cBody, TELet n te1 teBody ty)
+\end{minted}
+
+  \subsubsection{O Pipeline de Elaboração}
+
+  A função \haskell{inferElab} integra a
+  geração, resolução e aplicação da substituição:
+
+\begin{minted}{haskell}
+inferElab :: Exp -> Either String (Constraint, Env, TyExp, Type)
+inferElab e
+  = let rootVar      = TVar "a0"
+        ((c, te), _) = runState (elaborate e rootVar) 1
+    in case runSolveOnly (solve c) of
+         Left err  -> Left err
+         Right env ->
+           let s = subst env
+           in Right (c, env, apply s te, apply s rootVar)
+\end{minted}
+
+  O fluxo é:
+
+  \begin{enumerate}
+    \item
+      \textbf{Geração:} \haskell{elaborate e rootVar}
+      produz uma restrição \(C\) e uma árvore
+      \haskell{te} onde cada tipo é uma variável
+      \(a_i\) (marcador de posição). O contador começa em 1 porque
+      \(a_0\) é reservado como variável raiz.
+    \item
+      \textbf{Resolução:} \haskell{solve c} percorre
+      \(C\), realizando unificações e generalizações. O resultado é um
+      ambiente \haskell{env} com a substituição final
+      \(S = \mathtt{subst\; env}\).
+    \item
+      \textbf{Elaboração:} \haskell{apply s te} aplica
+      \(S\) a todos os marcadores de posição em
+      \haskell{te}, produzindo a árvore tipada final.
+      \haskell{apply s rootVar} retorna o tipo principal de \(e\).
+  \end{enumerate}
+
+  A arquitetura em duas fases, geração separada de resolução, é a
+  característica central da abordagem HM(X): o gerador é uma função
+  pura que não precisa saber nada sobre unificação, e o resolvedor não
+  precisa saber nada sobre a linguagem. A substituição final é o único
+  ponto de contato entre os dois.
+
+  \subsection{Eliminação de Tipos e Compilação para o $\lambda$-cálculo}
+
+  Uma vez que \haskell{inferElab} produz a árvore tipada
+  \haskell{te :: TyExp} com todos os tipos concretos, a compilação
+  prossegue em duas etapas adicionais: a eliminação de tipos, que
+  traduz \haskell{te} para um termo do $\lambda$-cálculo não tipado, e a
+  compilação desse termo para a linguagem de destino, reutilizando o
+  \emph{pipeline} já existente.
+
+  \subsubsection{O Módulo de Eliminação}
+
+  O módulo \haskell{MiniML.Backend.Lambda.Erase} implementa a função
+  \(\lfloor \cdot \rfloor\) da seção anterior. Cada equação da definição
+  matemática corresponde diretamente a uma equação em Haskell:
+
+\begin{minted}{haskell}
+module MiniML.Backend.Lambda.Erase (erase) where
+
+import qualified Lambda.Frontend.Syntax.Term as L
+import MiniML.Frontend.Syntax.Exp (Lit (..))
+import MiniML.Frontend.Syntax.TyExp
+
+erase :: TyExp -> L.Term
+erase (TEVar x _)       = L.Var x
+erase (TELit l _)       = L.Lit (eraseLit l)
+erase (TEApp e1 e2 _)   = L.App (erase e1) (erase e2)
+erase (TELam x _ e _)   = L.Lam x (erase e)
+erase (TELet n e1 e2 _) = L.App (L.Lam n (erase e2)) (erase e1)
+
+eraseLit :: Lit -> L.Lit
+eraseLit (LInt n)  = L.LInt n
+eraseLit (LBool b) = L.LBool b
+\end{minted}
+
+  As anotações de tipo de cada construtor (o último argumento) são
+  simplesmente descartadas pelo padrão \haskell{_}. O caso do
+  \haskell{let}, na última equação, gera o beta-redex
+  \texttt{App (Lam n (erase e2)) (erase e1)}, conforme a definição
+  formal da seção anterior.
+
+  \subsubsection{O Pipeline Completo}
+
+  Com o módulo de eliminação, o compilador de MiniML para TImp conecta
+  quatro fases em sequência:
+
+  \begin{enumerate}
+    \item \textbf{Análise sintática} (\haskell{parser}): transforma a
+      cadeia de entrada em uma árvore \haskell{Exp}.
+    \item \textbf{Inferência e elaboração} (\haskell{inferElab}): produz
+      a árvore tipada \haskell{TyExp} com todos os tipos concretos.
+    \item \textbf{Eliminação} (\haskell{erase}): descarta as anotações
+      de tipo, produzindo um \haskell{Term} do $\lambda$-cálculo não tipado.
+    \item \textbf{Compilação para TImp} (\haskell{lambdaToTImp}): aplica
+      o \emph{pipeline} de \emph{closure conversion} e promoção de
+      lambdas para gerar um programa TImp.
+  \end{enumerate}
+
+  O comando \haskell{:timp} do REPL de MiniML executa esse pipeline
+  completo:
+
+\begin{minted}{haskell}
+processTImp :: String -> IO ()
+processTImp input =
+  case parser (dropWhile (== ' ') input) of
+    Left err  -> putStrLn $ "Parse error:\n" ++ err
+    Right ast ->
+      case inferElab ast of
+        Left err -> putStrLn $ "Type error: " ++ err
+        Right (_, _, te, ty) -> do
+          putStrLn $ "val : " ++ pretty ty
+          let lterm = erase te
+              prog  = lambdaToTImp lterm
+          result <- interpret prog
+          case result of
+            Left err -> putStrLn $ "Runtime error: " ++ err
+            Right () -> return ()
+\end{minted}
+
+  Observe que o tipo inferido é exibido \emph{antes} da execução: ele
+  provém da fase de inferência, que já terminou. A execução em si opera
+  sobre o $\lambda$-cálculo não tipado, sem qualquer referência a tipos em
+  tempo de execução, confirmando o princípio da eliminação.
+
+  \textbf{Exemplo.} Para a entrada \haskell{let f = \x . x in f 42}:
+
+  \begin{enumerate}
+    \item A inferência produz o tipo \haskell{int} e a árvore tipada
+      \(te = \mathbf{let}\; f = (\lambda x{:}\alpha.\; x{:}\alpha){:}\alpha
+      \to \alpha\; \mathbf{in}\; (f\; 42){:}\mathbf{Int}\).
+    \item A eliminação produz o lambda-termo
+      \((\lambda f.\; f\; 42)\; (\lambda x.\; x)\).
+    \item A \emph{closure conversion} promove \(\lambda f\) e \(\lambda
+      x\) em funções de topo, representando cada closure como um registro
+      \texttt{Closure}.
+    \item O interpretador de TImp avalia o programa e imprime \texttt{42}.
+  \end{enumerate}
+
+  A modularidade dessa arquitetura é a sua maior vantagem: a fase de
+  inferência de tipos não precisa conhecer o formato de saída, e o
+  \emph{backend} de $\lambda$-cálculo não precisa saber nada sobre sistemas
+  de tipos. A eliminação de tipos é o ponto de desacoplamento que une as
+  duas partes do compilador.
+
+  \section{Conclusão}
+
+  Este capítulo desenvolveu a inferência de tipos para MiniML por meio
+  da abordagem de geração e resolução de restrições. A função
+  \(\mathcal{G}(e, \alpha)\) transforma o
+  problema de inferência em um sistema de equações entre tipos que
+  captura exatamente as condições que qualquer atribuição de tipos
+  válida deve satisfazer. O resolvedor de restrições, baseado na
+  unificação de Robinson e na generalização de Milner, encontra a
+  solução mais geral possível: o tipo principal.
+
+  Os teoremas de correção e completude garantem que o algoritmo não
+  produz falsos positivos nem falsos negativos: se o algoritmo aceita
+  um programa, ele é verdadeiramente bem tipado; se o algoritmo
+  rejeita, não existe nenhuma atribuição de tipos válida. O tipo
+  principal captura toda a informação de tipo disponível para um
+  programa: qualquer tipo válido é uma instância do tipo principal.
+
+  A implementação em Haskell evidencia a correspondência sistemática
+  entre a especificação matemática e o código. Cada regra de geração
+  corresponde a uma equação do gerador; cada linha do resolvedor
+  implementa um caso da definição semântica de satisfazibilidade; e a
+  classe \haskell{Apply} é a realização computacional
+  da substituição matemática. A separação em módulos (tipos,
+  restrições, gerador, resolvedor, elaborador) reflete a
+  modularidade conceitual do algoritmo.
+
+  A extensão para produzir árvores tipadas, seguindo a elaboração em
+  estilo aplicativo, mostra que a inferência de tipos não precisa se
+  limitar a produzir um tipo: ela pode ser vista como uma transformação
+  que anota o programa com toda a informação de tipo descoberta durante
+  a inferência, servindo de base para fases posteriores do compilador,
+  como geração de código especializado ou análises de otimização
+  sensíveis a tipos.

@@ -1,0 +1,13 @@
+-- Calcula o fatorial de 10 usando um laço while.
+-- Uso: cabal run twhile -- --wasm --file examples/fatorial.twhile
+
+var n   : int  = 10;
+var acc : int  = 1;
+var i   : int  = 1;
+
+while i < n {
+    acc := acc * i;
+    i   := i + 1;
+}
+
+print acc;

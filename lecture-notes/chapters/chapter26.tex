@@ -1,0 +1,615 @@
+\chapter{Análise de Vivacidade e Alocação de
+Registradores}\label{chap:x86-alloc}
+
+\section{Introdução}
+
+A IRT canônica produzida pelo capítulo anterior contém temporários em
+quantidade potencialmente ilimitada. O hardware X86-64 oferece apenas
+dez registradores no pool de alocação. A \textbf{alocação de registradores}
+é o processo de decidir, para cada temporário, se ele vai residir num
+registrador físico ou num slot na pilha (o chamado \emph{derramamento} ou
+\emph{spilling}).
+
+A chave para uma alocação correta é saber quais temporários precisam
+existir simultaneamente. Dois temporários que nunca estão ``vivos'' ao
+mesmo tempo podem compartilhar o mesmo registrador sem problema. A
+\textbf{análise de vivacidade} (\textit{liveness analysis}) computa
+exatamente esse conjunto para cada ponto do programa.
+
+Com a informação de vivacidade em mãos, o problema de alocação se
+reduz a $k$-coloração de grafos: os temporários são nós, há uma aresta
+entre dois temporários que interferem (estão vivos ao mesmo tempo) e
+devem receber a mesma ``cor'' (registrador). O clássico algoritmo de
+Kempe oferece uma solução eficiente, baseada em simplificação iterativa
+do grafo.
+
+Este capítulo cobre:
+
+\begin{enumerate}
+  \item Definição formal de vivacidade e as equações de ponto fixo que
+    a calculam.
+  \item Construção do grafo de interferência a partir da vivacidade.
+  \item O algoritmo de Kempe: simplificação, escolha de candidato a
+    derramamento e seleção de cores.
+  \item Implementação completa nos módulos \texttt{Liveness},
+    \texttt{IGraph} e \texttt{GraphColor}.
+\end{enumerate}
+
+\section{Análise de Vivacidade}
+
+\subsection{Definição}
+
+\begin{Definition}[Vivacidade]
+  Um temporário $t$ é \textbf{vivo} num ponto $p$ do programa se existe
+  algum caminho de $p$ até um \emph{uso} de $t$ que não passa por
+  nenhuma \emph{definição} de $t$.
+\end{Definition}
+
+Intuitivamente, $t$ é vivo em $p$ quando seu valor atual ``ainda vai ser
+necessário'' em alguma execução futura possível. Se $t$ não está vivo em
+$p$, seu registrador pode ser reutilizado por outro temporário.
+
+\subsection{Equações de Ponto Fixo}
+
+Dado o CFG linearizado com instruções $s_0, s_1, \ldots, s_{n-1}$,
+definimos para cada índice $i$:
+
+\begin{align*}
+  \mathit{use}[i] &= \text{conjunto de temporários \emph{lidos} por } s_i \\
+  \mathit{def}[i] &= \text{conjunto de temporários \emph{escritos} por } s_i
+\end{align*}
+
+As equações de \textbf{análise retroativa} são:
+
+\[
+  \mathit{live\_out}[i] = \bigcup_{j \in \mathit{succs}(i)} \mathit{live\_in}[j]
+\]
+
+\[
+  \mathit{live\_in}[i] = \mathit{use}[i] \cup
+  \bigl(\mathit{live\_out}[i] \setminus \mathit{def}[i]\bigr)
+\]
+
+A análise itera essas equações partindo de $\mathit{live\_in}[i] = \emptyset$
+para todo $i$, até que nenhum conjunto se altere (ponto fixo). A solução
+é a \emph{menor} solução: o conjunto mais restrito de temporários que
+satisfaz as equações.
+
+\begin{remark}
+  A análise é \emph{retroativa} porque vivacidade é uma propriedade do
+  futuro de um ponto de execução: para saber se $t$ é vivo antes de
+  $s_i$, precisamos saber se $t$ é usado depois de $s_i$: informação
+  que está nos \emph{sucessores} de $i$ no CFG. Por isso, iterar de
+  trás para frente dentro de cada passagem (ordem de Gauss-Seidel)
+  acelera a convergência.
+\end{remark}
+
+\subsection{Use e Def para Instruções IRT}
+
+A tabela a seguir define $\mathit{use}[i]$ e $\mathit{def}[i]$ para
+cada forma de enunciado IRT após a canonicalização:
+
+\begin{center}
+  \begin{tabular}{lll}
+    \toprule
+    Enunciado $s_i$ & $\mathit{use}[i]$ & $\mathit{def}[i]$ \\
+    \midrule
+    \texttt{MOVE(TEMP t, e)}      & $\mathit{temps}(e)$
+    & $\{t\}$   \\
+    \texttt{MOVE(MEM addr, val)}  & $\mathit{temps}(\mathit{addr})
+    \cup \mathit{temps}(\mathit{val})$ & $\emptyset$ \\
+    \texttt{EXP e}                & $\mathit{temps}(e)$
+    & $\emptyset$ \\
+    \texttt{CJUMP e \_ \_}       & $\mathit{temps}(e)$
+    & $\emptyset$ \\
+    \texttt{JUMP e}               & $\mathit{temps}(e)$
+    & $\emptyset$ \\
+    \texttt{RETURN [e]}           & $\mathit{temps}(e)$
+    & $\emptyset$ \\
+    \texttt{LABEL \_}             & $\emptyset$
+    & $\emptyset$ \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+Onde $\mathit{temps}(e)$ coleta recursivamente todos os \texttt{TEMP}
+em $e$. Apenas \texttt{MOVE(TEMP t, \_)} constitui uma \emph{definição}
+de $t$; todas as demais ocorrências de temporários, incluindo
+\texttt{MOVE(MEM addr, val)} onde $addr$ e $val$ são lidos mas nenhum
+temporário é escrito, são usos.
+
+\subsection{Implementação}
+
+O módulo \texttt{IR.Backend.X86.Liveness} implementa as funções de
+uso e definição:
+
+\begin{minted}{haskell}
+freeTempsExpr :: Expr -> Set Temp
+freeTempsExpr (TEMP t)        = Set.singleton t
+freeTempsExpr (BINOP _ e1 e2) = freeTempsExpr e1 `Set.union` freeTempsExpr e2
+freeTempsExpr (MEM e)         = freeTempsExpr e
+freeTempsExpr (CALL ef args)  = Set.unions (map freeTempsExpr (ef : args))
+freeTempsExpr (ESEQ s e)      = useTemp s `Set.union` freeTempsExpr e
+freeTempsExpr _               = Set.empty  -- CONST, NAME
+
+useTemp :: Stmt -> Set Temp
+useTemp (MOVE (TEMP _)   e)   = freeTempsExpr e
+useTemp (MOVE dst        src) = freeTempsExpr dst `Set.union` freeTempsExpr src
+useTemp (EXP e)               = freeTempsExpr e
+useTemp (RETURN es)           = Set.unions (map freeTempsExpr es)
+useTemp (CJUMP e _ _)         = freeTempsExpr e
+useTemp _                     = Set.empty
+
+defTemp :: Stmt -> Set Temp
+defTemp (MOVE (TEMP t) _) = Set.singleton t
+defTemp _                 = Set.empty
+\end{minted}
+
+E o cálculo de ponto fixo:
+
+\begin{minted}{haskell}
+type LiveMap = Map Int (Set Temp)   -- live_in[i]
+
+liveness :: FuncCFG -> LiveMap
+liveness cfg = fixpoint initMap
+  where
+    idxs    = reverse (cfgIndices cfg)  -- ordem retroativa
+    initMap = Map.fromList [(i, Set.empty) | i <- cfgIndices cfg]
+
+    fixpoint m =
+      let m' = foldl step m idxs
+      in if m' == m then m else fixpoint m'
+
+    step acc i =
+      let lo    = Set.unions [acc Map.! j | j <- succs cfg i]
+          newIn = useTemp (cfgStmtAt cfg i)
+                  `Set.union`
+                  (lo `Set.difference` defTemp (cfgStmtAt cfg i))
+      in Map.insert i newIn acc
+\end{minted}
+
+A função \texttt{liveOut cfg liveIn i} calcula $\mathit{live\_out}[i]$
+a partir do \texttt{LiveMap} finalizado:
+
+\begin{minted}{haskell}
+liveOut :: FuncCFG -> LiveMap -> Int -> Set Temp
+liveOut cfg liveIn i =
+  Set.unions [liveIn Map.! j | j <- succs cfg i]
+\end{minted}
+
+\section{Grafo de Interferência}
+
+\subsection{Definição}
+
+\begin{Definition}[Interferência]
+  Dois temporários $t$ e $u$ \textbf{interferem} se existe alguma
+  instrução $i$ tal que $t \in \mathit{def}[i]$ e
+  $u \in \mathit{live\_out}[i]$ (ou vice-versa), com $t \neq u$.
+\end{Definition}
+
+Temporários que interferem não podem ocupar o mesmo registrador, pois na
+instrução de definição ambos precisam de locais distintos: $t$ está sendo
+criado e $u$ ainda será necessário.
+
+O \textbf{grafo de interferência} $G = (V, E)$ tem:
+
+\begin{itemize}
+  \item $V$ = conjunto de todos os temporários do programa.
+  \item $(t, u) \in E$ se e somente se $t$ e $u$ interferem.
+\end{itemize}
+
+A regra de construção é:
+
+\[
+  \infer{\text{adicionar aresta } (t, u) \text{ a } G}
+  {t \in \mathit{def}[i] \quad u \in \mathit{live\_out}[i] \quad t \neq u}
+\]
+
+\subsection{Parâmetros com Interferência Mútua}
+
+Os parâmetros formais de uma função chegam carregados em registradores
+distintos da ABI (\texttt{\%rdi}, \texttt{\%rsi}, etc.) e estão todos
+vivos \emph{simultaneamente} no ponto de entrada da função. A análise de
+vivacidade pode não ver isso explicitamente — se um parâmetro não possui
+uso após a instrução de entrada, ele pode não aparecer em nenhum
+$\mathit{live\_in}[i]$.
+
+Por isso, antes de iniciar a coloração, adicionamos arestas entre todos
+os pares de parâmetros formais:
+
+\[
+  \forall\, p_1, p_2 \in \mathit{params},\; p_1 \neq p_2 \implies
+  (p_1, p_2) \in E
+\]
+
+Sem essa inserção, dois parâmetros distintos podem ser mapeados ao mesmo
+registrador — um erro silencioso que produz resultados errados.
+
+\subsection{Estrutura de Dados}
+
+O módulo \texttt{IR.Backend.X86.IGraph} implementa o grafo de
+interferência com lista de adjacência e cache de graus:
+
+\begin{minted}{haskell}
+data IGraph = IGraph
+  { igAdj :: Map Temp (Set Temp)   -- adjacências (simétrica)
+  , igDeg :: Map Temp Int           -- cache de graus
+  } deriving (Eq, Show)
+
+addEdge :: Temp -> Temp -> IGraph -> IGraph
+addEdge t u g
+  | t == u    = addNode t g
+  | u `Set.member` neighbors t g' = g'
+  | otherwise = g'
+      { igAdj = Map.adjust (Set.insert u) t
+              $ Map.adjust (Set.insert t) u
+              $ igAdj g'
+      , igDeg = Map.adjust (+1) t
+              $ Map.adjust (+1) u
+              $ igDeg g'
+      }
+  where g' = addNode u (addNode t g)
+
+removeNode :: Temp -> IGraph -> IGraph
+removeNode t g =
+  let nbrs = neighbors t g
+      g'   = g { igAdj = Map.delete t (igAdj g)
+               , igDeg = Map.delete t (igDeg g) }
+  in Set.foldl' (\acc u ->
+       acc { igAdj = Map.adjust (Set.delete t) u (igAdj acc)
+           , igDeg = Map.adjust (subtract 1)   u (igDeg acc) })
+     g' nbrs
+\end{minted}
+
+O cache \texttt{igDeg} evita recomputar o grau de cada nó a cada passo
+da simplificação, o que seria $O(n)$ por nó sem o cache.
+
+\subsection{Construção do Grafo}
+
+\begin{minted}{haskell}
+buildIGraph :: FuncCFG -> LiveMap -> IGraph
+buildIGraph cfg liveIn =
+  let allTemps =
+        Set.unions (Map.elems liveIn)
+        `Set.union`
+        Set.unions [defTemp (cfgStmtAt cfg i) | i <- cfgIndices cfg]
+      g0 = Set.foldl' (flip addNode) emptyIGraph allTemps
+  in foldl' addInstr g0 (cfgIndices cfg)
+  where
+    addInstr g i =
+      let tSet = defTemp (cfgStmtAt cfg i)
+          out  = liveOut cfg liveIn i
+      in if Set.null tSet then g
+         else Set.foldl' (\g' u -> addEdge (Set.findMin tSet) u g') g out
+\end{minted}
+
+Todos os temporários são adicionados como nós, mesmo aqueles sem arestas
+(temporários cujo valor é definido mas nunca está vivo ao mesmo tempo que
+outro temporário). Isso garante que recebam uma cor mesmo sem restrições.
+
+\section{Alocação por Coloração de Grafo}
+
+\subsection{O Problema}
+
+Dado um grafo de interferência $G$ e um conjunto de $k$ ``cores''
+(registradores do pool de alocação), o problema é atribuir uma cor a
+cada temporário de modo que temporários adjacentes recebam cores
+distintas. Se não for possível colorir algum nó com as cores
+disponíveis, ele é \textbf{derramado} (\textit{spilled}): seu valor é
+armazenado na pilha e carregado/guardado a cada uso/definição.
+
+O pool de alocação tem $k = 10$ registradores:
+\texttt{\%rbx}, \texttt{\%rcx}, \texttt{\%rsi}, \texttt{\%rdi},
+\texttt{\%r8}, \texttt{\%r9}, \texttt{\%r12}–\texttt{\%r15}.
+
+\subsection{Preferência de Cores: Callee-Saved Primeiro}
+
+As cores são oferecidas ao nó em uma ordem de preferência:
+\emph{callee-saved primeiro}, depois os caller-saved do pool.
+
+\[
+  \mathit{preferOrder} = [\texttt{\%rbx},\, \texttt{\%r12},\, \texttt{\%r13},\,
+    \texttt{\%r14},\, \texttt{\%r15},\, \texttt{\%rcx},\, \texttt{\%rsi},\,
+  \texttt{\%rdi},\, \texttt{\%r8},\, \texttt{\%r9}]
+\]
+
+A razão: um temporário que recebe um registrador callee-saved e sobrevive
+a uma chamada de função não precisa ser salvo e restaurado em torno do
+\texttt{callq} — o próprio protocolo de chamada garante isso. Já um
+temporário em registrador caller-saved precisaria ser explicitamente salvo
+antes de cada chamada e restaurado depois.
+
+\subsection{Algoritmo de Kempe}
+
+O algoritmo opera em duas fases principais.
+
+\subsubsection{Fase 1 — Simplificação}
+
+Enquanto houver nós com grau $< k$, remova um deles e empilhe-o.
+Se todos os nós tiverem grau $\geq k$, escolha um candidato a
+derramamento e remova-o (marcando-o como potencial derramamento).
+
+A propriedade fundamental é:
+
+\begin{Theorem}[Simplificação segura]
+  Se $G$ tem um nó $t$ com $\mathit{grau}(t) < k$, então $G$ é
+  $k$-colorível se e somente se $G \setminus \{t\}$ é $k$-colorível.
+\end{Theorem}
+
+\emph{Demonstração.} Se $G \setminus \{t\}$ é $k$-colorível, os
+vizinhos de $t$ usam no máximo $k-1$ cores distintas, logo existe
+sempre pelo menos uma cor livre para $t$. \(\square\)
+
+Isso significa que podemos simplificar com segurança qualquer nó de
+grau $< k$: a sua remoção não pode transformar um grafo colorível em
+não-colorível.
+
+Para a escolha do candidato a derramamento quando não há nó de grau
+$< k$, usamos uma heurística: derrama o temporário com o
+\textbf{maior intervalo de vivacidade}.
+
+\begin{Definition}[Intervalo de vivacidade]
+  O intervalo de $t$ é $[\mathit{start}(t), \mathit{end}(t)]$ onde
+  $\mathit{start}(t)$ é o menor índice em que $t$ está vivo ou é
+  definido, e $\mathit{end}(t)$ é o maior índice em que $t$ está vivo.
+  O comprimento é $\mathit{end}(t) - \mathit{start}(t)$.
+\end{Definition}
+
+Um temporário com intervalo longo exerce pressão sobre o pool por
+mais instruções, sendo o candidato mais natural a ceder seu registrador.
+
+\subsubsection{Fase 2 — Seleção de Cores}
+
+Após o empilhamento, desempilhamos os temporários um a um e atribuímos
+a menor cor disponível (na ordem de preferência). ``Disponível'' significa
+não usada por nenhum vizinho \emph{no grafo original} (antes das remoções).
+
+\[
+  \infer{\text{atribuir } c^* = \min(\mathit{Pool} \setminus
+  C_{\mathit{usadas}}) \text{ a } t}
+  {C_{\mathit{usadas}} = \{c \mid (t, u) \in E_{\mathit{orig}},\;
+  \mathit{cor}(u) = c\}}
+\]
+
+Se $\mathit{Pool} \setminus C_{\mathit{usadas}} = \emptyset$, o nó é
+derramado: recebe um offset de memória negativo em relação a
+\texttt{\%rbp} ($-8$, $-16$, etc.).
+
+A fase de seleção usa o grafo \emph{original} (não o simplificado) para
+consultar os vizinhos. As remoções da fase 1 são apenas um dispositivo
+para determinar a \emph{ordem} de coloração, não para alterar as restrições.
+
+\subsection{Implementação: Simplificação}
+
+\begin{minted}{haskell}
+simplify :: IGraph -> IntervalMap -> ([Temp], Set Temp)
+simplify ig0 ivm = go ig0 [] Set.empty (Set.toList (nodes ig0))
+  where
+    go _  stk spills []  = (stk, spills)
+    go ig stk spills wl  =
+      case findLow ig wl of
+        Just t  ->
+          go (removeNode t ig) (t : stk) spills (filter (/= t) wl)
+        Nothing ->
+          let t = maximumBy
+                    (comparing (\t' -> maybe 0 ivLen (Map.lookup t' ivm)))
+                    wl
+          in go (removeNode t ig) (t : stk) (Set.insert t spills)
+                (filter (/= t) wl)
+
+findLow :: IGraph -> [Temp] -> Maybe Temp
+findLow ig = listToMaybe . filter (\t -> degree t ig < k)
+\end{minted}
+
+\subsection{Implementação: Seleção}
+
+\begin{minted}{haskell}
+selectColors :: [Temp] -> Set Temp -> IGraph -> Int -> (Coloring, Int)
+selectColors stack _potSpills origGraph startSlot =
+  foldl' step (Map.empty, startSlot) stack
+  where
+    step (col, nextSlot) t =
+      let used  = Set.fromList
+                    [ r | u <- Set.toList (neighbors t origGraph)
+                        , Just (InReg r) <- [Map.lookup u col] ]
+          avail = filter (`Set.notMember` used) preferOrder
+      in case avail of
+           (r : _) -> (Map.insert t (InReg r)       col, nextSlot)
+           []      -> (Map.insert t (InMem nextSlot) col, nextSlot - 8)
+\end{minted}
+
+O resultado é um \texttt{Coloring} (mapa de temporário para
+\texttt{TempLoc}) e o próximo offset de spill disponível. Slots de spill
+são alocados em $-8, -16, -24, \ldots$ a partir de \texttt{\%rbp}.
+
+\subsection{Ponto de Entrada: \texttt{colorFunc}}
+
+\begin{minted}{haskell}
+colorFunc :: [Temp] -> Stmt -> (Coloring, Int)
+colorFunc params body =
+  let cfg        = buildCFG body
+      livm       = liveness cfg
+      ivm        = buildIntervalMap cfg livm
+      ig0        = buildIGraph cfg livm
+      ig         = addParamEdges params ig0
+      (stack, potSpills) = simplify ig ivm
+      (col, nextSlot)    = selectColors stack potSpills ig (-8)
+      spillBytes         = negate nextSlot - 8
+  in (col, spillBytes)
+  where
+    addParamEdges ps g =
+      foldr (\(p1, p2) acc -> addEdge p1 p2 acc) g
+            [(p1, p2) | p1 <- ps, p2 <- ps, p1 /= p2]
+\end{minted}
+
+O valor \texttt{spillBytes} é o número de bytes a reservar na pilha para
+temporários derramados ($0$ quando não há derramamento).
+
+\section{Layout de Frame e Alinhamento}
+
+\subsection{Layout}
+
+O frame de ativação de uma função tem a seguinte estrutura (crescendo
+de cima para baixo, em direção a endereços menores):
+
+\begin{center}
+  \begin{tabular}{|c|}
+    \hline
+    \ldots (frame do chamador) \\
+    \hline
+    endereço de retorno \quad [\texttt{callq} empilha] \\
+    \hline
+    \texttt{\%rbp} antigo \quad [\texttt{pushq \%rbp}] \\
+    \hline
+    registradores callee-saved \quad [$N \times 8$ bytes] \\
+    \hline
+    slots de spill \quad [$\mathit{spillBytes}$ bytes] \\
+    \hline
+    padding de alinhamento \\
+    \hline
+  \end{tabular}
+\end{center}
+
+\subsection{Cálculo de \texttt{frameAdj}}
+
+O ABI System V AMD64 exige que \texttt{\%rsp} seja múltiplo de 16 bytes
+no momento da instrução \texttt{callq} (que empilha 8 bytes). Após o
+\texttt{pushq \%rbp} o stack está alinhado a 16. Cada push de registrador
+callee-saved desloca 8 bytes. Precisamos de um ajuste $F \geq
+\mathit{spillBytes}$
+tal que:
+
+\[
+  8N + F \equiv 0 \pmod{16}
+\]
+
+onde $N$ é o número de registradores callee-saved empilhados no prólogo.
+
+\begin{minted}{haskell}
+frameAdj :: Int -> Int -> Int
+frameAdj nCallee spillBytes =
+  let base     = align16 spillBytes
+      total    = 8 * nCallee + base
+      misalign = total `mod` 16
+  in if misalign == 0 then base else base + (16 - misalign)
+
+align16 :: Int -> Int
+align16 n = ((n + 15) `div` 16) * 16
+\end{minted}
+
+Se $F = 0$, a instrução \texttt{subq \$0, \%rsp} é omitida.
+
+\section{Exemplo: Alocação em \texttt{factorial}}
+
+\subsection{IRT Canônica (simplificada)}
+
+\begin{center}
+  \begin{tabular}{ll}
+    \toprule
+    Índice & Enunciado \\
+    \midrule
+    0 & \texttt{MOVE(TEMP n, TEMP arg)} \\
+    1 & \texttt{MOVE(TEMP t0, BINOP(EQ, TEMP n, CONST 0))} \\
+    2 & \texttt{CJUMP(TEMP t0, .true, .false)} \\
+    3 & \texttt{LABEL .true} \\
+    4 & \texttt{RETURN [CONST 1]} \\
+    5 & \texttt{LABEL .false} \\
+    6 & \texttt{MOVE(TEMP t1, BINOP(SUB, TEMP n, CONST 1))} \\
+    7 & \texttt{MOVE(TEMP r, CALL(factorial, [TEMP t1]))} \\
+    8 & \texttt{MOVE(TEMP t2, BINOP(MUL, TEMP n, TEMP r))} \\
+    9 & \texttt{RETURN [TEMP t2]} \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\subsection{Vivacidade}
+
+\begin{center}
+  \begin{tabular}{cllll}
+    \toprule
+    $i$ & $\mathit{use}[i]$ & $\mathit{def}[i]$ &
+    $\mathit{live\_in}[i]$ & $\mathit{live\_out}[i]$ \\
+    \midrule
+    0 & \{arg\}    & \{n\}  & \{arg\}    & \{n\}       \\
+    1 & \{n\}      & \{t0\} & \{n\}      & \{n, t0\}   \\
+    2 & \{t0\}     & $\emptyset$ & \{n, t0\} & \{n\}  \\
+    4 & $\emptyset$ & $\emptyset$ & $\emptyset$ & $\emptyset$ \\
+    6 & \{n\}      & \{t1\} & \{n\}      & \{n, t1\}   \\
+    7 & \{t1\}     & \{r\}  & \{n, t1\}  & \{n, r\}    \\
+    8 & \{n, r\}   & \{t2\} & \{n, r\}   & \{t2\}      \\
+    9 & \{t2\}     & $\emptyset$ & \{t2\} & $\emptyset$ \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\subsection{Grafo de Interferência}
+
+As arestas são adicionadas pela regra: $t \in \mathit{def}[i]$,
+$u \in \mathit{live\_out}[i]$, $t \neq u$:
+
+\begin{itemize}
+  \item $i=1$: def=\{t0\}, live\_out=\{n, t0\} $\to$ aresta $(t0, n)$
+  \item $i=6$: def=\{t1\}, live\_out=\{n, t1\} $\to$ aresta $(t1, n)$
+  \item $i=7$: def=\{r\}, live\_out=\{n, r\} $\to$ aresta $(r, n)$
+  \item $i=8$: def=\{t2\}, live\_out=\{t2\} $\to$ nenhuma (t2 não
+    interfere com outros)
+\end{itemize}
+
+Arestas de parâmetros: como \texttt{factorial} tem um único parâmetro
+\texttt{arg}, não há par para inserir aresta mútua.
+
+\medskip
+\noindent
+Resumo do grafo:
+$n \leftrightarrow t0$, $n \leftrightarrow t1$, $n \leftrightarrow r$.
+O nó $n$ tem grau 3; os demais têm grau $\leq 1$.
+
+\subsection{Coloração}
+
+$k = 10 > 3$, logo todos os nós têm grau $< k$. Ordem de simplificação
+(grau do menor ao maior): \texttt{arg}, \texttt{t0}, \texttt{t1},
+\texttt{r}, \texttt{t2}, \texttt{n}.
+
+Seleção (desempilhando, preferência callee-saved):
+
+\begin{center}
+  \begin{tabular}{lll}
+    \toprule
+    Temporário & Vizinhos já coloridos & Cor atribuída \\
+    \midrule
+    \texttt{n}   & $\emptyset$                    & \texttt{\%rbx} \\
+    \texttt{t2}  & $\emptyset$                    & \texttt{\%rbx} \\
+    \texttt{r}   & \{n=\texttt{\%rbx}\}           & \texttt{\%r12} \\
+    \texttt{t1}  & \{n=\texttt{\%rbx}\}           & \texttt{\%r12} \\
+    \texttt{t0}  & \{n=\texttt{\%rbx}\}           & \texttt{\%r12} \\
+    \texttt{arg} & $\emptyset$                    & \texttt{\%rbx} \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\texttt{n} e \texttt{t2} recebem \texttt{\%rbx} sem conflito porque seus
+intervalos não se sobrepõem. Da mesma forma, \texttt{r}, \texttt{t1} e
+\texttt{t0} recebem \texttt{\%r12} porque nunca estão todos vivos ao mesmo
+tempo.
+
+O prólogo empilha \texttt{\%rbx} e \texttt{\%r12} ($N = 2$).
+$\mathit{spillBytes} = 0$.
+$\mathit{frameAdj}(2, 0) = \mathit{align16}(0) = 0$, com
+$8 \cdot 2 + 0 = 16 \equiv 0 \pmod{16}$: sem \texttt{subq}.
+
+\section{Conclusão}
+
+A análise de vivacidade e a alocação por coloração de grafos são as duas
+fases que determinam a \emph{qualidade} do código gerado: um coloridor
+eficiente minimiza os derramamentos, reduzindo os acessos à memória; um
+cálculo correto de vivacidade garante que dois temporários vivos ao mesmo
+tempo nunca compartilhem um registrador.
+
+A adição explícita de arestas entre parâmetros formais é um detalhe
+crucial que não aparece na formulação tradicional do algoritmo de Kempe,
+mas que é indispensável quando os parâmetros chegam em registradores da
+ABI e são copiados para temporários antes de serem usados.
+
+No próximo capítulo traduzimos a IRT anotada com o \texttt{Coloring} para
+instruções X86-64 concretas, gerenciando o alinhamento de pilha em
+chamadas aninhadas e emitindo o prólogo e o epílogo corretos para cada função.

@@ -1,0 +1,1033 @@
+\chapter{Análise descendente recursiva}
+
+\section{Introdução}
+
+Neste capítulo vamos estudar a primeira técnica para construção de
+analisadores sintáticos: a análise descendente recursiva. Essa
+técnica permite a construção de um analisador sintático como um
+conjunto de funções, uma para cada não terminal da gramática da
+linguagem considerada.
+
+Em linguagens funcionais, como Haskell, uma abordagem elegante para
+construção de analisadores descendentes recursivos utiliza os
+chamados \textbf{combinadores de parsing}, que consistem de um
+funções para construir analisadores simples e outras funções para
+combinar analisadores existentes. Essa técnica permite descrever a
+gramática da linguagem de forma direta. O código discutido neste
+capítulo está disponível nos arquivos
+\begin{flushleft}
+  \verb|Parsing/Descendent/Combinators.hs|,\\
+  \verb|Parsing/Descendent/Expr.hs| e\\
+  \verb|Parsing/Descendent/ExpExample.hs|.
+\end{flushleft}
+
+\section{Combinadores de parsing}
+
+A ideia central por trás dos combinadores de parsing é tratar um
+analisador sintático como um \textbf{valor de primeira classe}: um
+analisador é simplesmente uma função que recebe uma lista de símbolos
+e retorna os possíveis resultados da análise. Essa representação
+permite combinar analisadores simples para construir analisadores
+mais complexos usando funções de ordem superior.
+
+\subsection{O tipo Parser}
+
+O tipo fundamental da biblioteca é definido como:
+
+\begin{minted}{haskell}
+newtype Parser s a =
+  Parser { runParser :: [s] -> [(a,[s])] }
+\end{minted}
+
+Um valor do tipo \haskell{Parser s a} representa um
+analisador que:
+\begin{itemize}
+  \item Consome símbolos do tipo \haskell{s} (por exemplo,
+    \haskell{Char} ou algum tipo de token);
+  \item Produz resultados do tipo \haskell{a} (por exemplo, uma
+    árvore de sintaxe abstrata).
+\end{itemize}
+
+A função \haskell{runParser} extrai a função
+subjacente, que recebe a entrada como uma lista de símbolos
+\haskell{[s]} e devolve uma lista de pares
+\haskell{[(a, [s])]}. Cada par contém um possível
+resultado da análise e o restante da entrada ainda não consumida.
+
+O uso de uma lista de resultados é o que torna esta representação
+poderosa: a lista vazia, \haskell{[]}, sinaliza
+\textbf{falha} (nenhum resultado possível), enquanto uma lista com
+múltiplos elementos representa um analisador \textbf{ambíguo}, com
+mais de uma interpretação possível para a entrada. Um analisador
+determinístico retornará sempre no máximo um elemento na lista.
+
+\subsection{Instâncias de classes de tipos}
+
+A estrutura algébrica do tipo \haskell{Parser} é
+rica: ele pode ser instanciado em várias classes de tipos de Haskell,
+o que nos dá gratuitamente um conjunto de combinadores expressivos.
+
+\textbf{Functor.} Um parser é um functor: dado um parser que produz
+valores do tipo \haskell{a} e uma função
+\haskell{f :: a -> b}, podemos construir um parser
+que produz valores do tipo \haskell{b}, aplicando
+\haskell{f} a cada resultado.
+
+\begin{minted}{haskell}
+instance Functor (Parser s) where
+  fmap f p
+    = Parser (\ s -> [(f x, s') |
+                      (x,s') <- runParser p s])
+\end{minted}
+
+\textbf{Applicative.} Um parser é um functor aplicativo. O combinador
+\haskell{pure} cria um functor que sempre tem sucesso
+sem consumir entrada, retornando o valor fornecido. O operador
+\haskell{<*>} sequencia dois parsers: o primeiro
+produz uma função e o segundo produz um argumento; os resultados são combinados.
+
+\begin{minted}{haskell}
+instance Applicative (Parser s) where
+  pure  a = Parser (\ts -> [(a, ts)])
+  p1 <*> p2 = Parser (\ s -> [(f x, s2) |
+           (f, s1) <- runParser p1 s,
+           (x, s2) <- runParser p2 s1])
+\end{minted}
+
+\textbf{Alternative.} A instância de
+\haskell{Alternative} nos fornece o combinador de
+\textbf{escolha}. O parser \haskell{empty} falha
+sempre. O operador \haskell{<|>} tenta o primeiro
+parser e o segundo parser. Porém, dada a lazy evaluation de Haskell,
+o segundo parser só será realmente executado se o primeiro falhar.
+Isso se deve devido a concatenação dos resultados de ambos os parsers.
+
+\begin{minted}{haskell}
+instance Alternative (Parser t) where
+  empty = Parser (\ _ -> [])
+  p1 <|> p2 = Parser
+     (\ s -> runParser p1 s ++
+             runParser p2 s)
+\end{minted}
+
+\textbf{Monad.} A instância de \haskell{Monad}
+permite que o segundo parser dependa do resultado do primeiro.
+
+\begin{minted}{haskell}
+instance Monad (Parser t) where
+  return =  pure
+  p >>= f  = Parser (\ts -> concat [ runParser (f a) cs' |
+                                     (a,cs') <- runParser p ts ])
+\end{minted}
+
+Com essa instância, é possível escrever analisadores em notação
+\haskell{do}, tornando o código mais legível para
+parsers com múltiplos estágios sequenciais.
+
+\textbf{MonadPlus.} Essa instância espelha a instância de
+\haskell{Alternative}, fornecendo
+\haskell{mzero} (falha) e
+\haskell{mplus} (escolha) para uso no contexto monádico.
+
+\subsection{Combinadores primitivos}
+
+A biblioteca oferece dois parsers primitivos que servem como base
+para todos os demais.
+
+A função \haskell{item} consome exatamente um símbolo
+da entrada, falhando se a entrada estiver vazia:
+
+\begin{minted}{haskell}
+item :: Parser t t
+item = Parser (\ ts ->
+                 case ts of
+                   []     -> []
+                   (c:cs) -> [(c,cs)])
+\end{minted}
+
+O combinador \haskell{sat} consome um símbolo somente
+se ele satisfaz um predicado:
+
+\begin{minted}{haskell}
+sat :: (t -> Bool) -> Parser t t
+sat p = do
+          t <- item
+          if p t then return t else mzero
+\end{minted}
+
+A partir de \haskell{sat}, derivamos diretamente os
+combinadores para reconhecer símbolos e sequências específicas:
+
+\begin{minted}{haskell}
+symbol :: Eq s => s -> Parser s s
+symbol c = sat (c ==)
+
+token :: Eq s => [s] -> Parser s [s]
+token = mapM symbol
+\end{minted}
+
+\haskell{symbol c} consome exatamente o símbolo
+\haskell{c}; \haskell{token ts}
+consome exatamente a sequência \haskell{ts},
+aplicando \haskell{symbol} a cada elemento.
+
+\subsection{Combinadores de alto nível}
+
+Utilizando as funções primitivas, podemos construir um conjunto de
+combinadores de alto nível.
+
+\textbf{Repetição.} A classe \haskell{Alternative}
+fornece \haskell{many} (zero ou mais repetições) e
+\haskell{many1} (uma ou mais):
+
+\begin{minted}{haskell}
+many1    :: Parser s a -> Parser s [a]
+many1 p  =  list <$> p <*> many p
+\end{minted}
+
+\textbf{Opção.} O combinador \haskell{option} executa
+um parser opcionalmente, retornando um valor padrão em caso de falha:
+
+\begin{minted}{haskell}
+option :: Parser s a -> a -> Parser s a
+option p v = p <|> succeed v
+\end{minted}
+
+\textbf{Pack.} O combinador \haskell{pack} sequencia
+três parsers, descartando o resultado do primeiro e do terceiro e
+retornando apenas o resultado do segundo. É útil para reconhecer
+construções entre delimitadores:
+
+\begin{minted}{haskell}
+pack :: Parser s a -> Parser s b -> Parser s c -> Parser s b
+pack p r q  =  pi32 <$> p <*> r <*> q
+\end{minted}
+
+Por exemplo, \haskell{pack (symbol '(') p (symbol ')')}
+reconhece \haskell{p} entre parênteses.
+
+\textbf{Separadores.} O combinador \haskell{listOf}
+reconhece uma lista de itens separados por um delimitador:
+
+\begin{minted}{haskell}
+listOf      :: Parser s a -> Parser s b -> Parser s [a]
+listOf p s  =  list <$> p <*> many (pi22 <$> s <*> p)
+\end{minted}
+
+\textbf{Repetição gulosa.} O combinador
+\haskell{determ} trunca a lista de resultados ao
+primeiro, tornando o parser determinístico. Sobre ele,
+\haskell{greedy} e \haskell{greedy1}
+implementam versões determinísticas de \haskell{many}
+e \haskell{many1}:
+
+\begin{minted}{haskell}
+determ  ::  Parser s b -> Parser s b
+determ p = Parser (\ ts ->
+                     case (runParser p ts) of
+                       []    -> []
+                       (x:_) -> [x] )
+
+greedy, greedy1  ::  Parser s b -> Parser s [b]
+greedy   =  determ . many
+greedy1  =  determ . many1
+\end{minted}
+
+\subsection{Aplicações para tipos concretos}
+
+Com os combinadores acima, a biblioteca define analisadores para
+construções léxicas comuns sobre \haskell{Parser Char}:
+
+\begin{minted}{haskell}
+digit :: Parser Char Int
+digit = f <$> sat isDigit
+  where
+    f c = ord c - ord '0'
+
+natural  :: Parser Char Int
+natural  =  foldl (\a b -> a*10 + b) 0 <$> many1 digit
+
+integer  ::  Parser Char Int
+integer  =  (const negate <$> (symbol '-')) `option` id  <*>  natural
+
+identifier :: Parser Char String
+identifier =  list <$> sat isAlpha <*> greedy (sat isAlphaNum)
+
+parens :: Parser Char a -> Parser Char a
+parens p  =  pack (symbol '(') p (symbol ')')
+
+spaces :: Parser Char String
+spaces = greedy (sat isSpace)
+\end{minted}
+
+\subsection{Combinadores para encadeamento de operadores}
+
+Um padrão muito comum em gramáticas de linguagens de programação é a
+expressão com operadores infixos associativos. Para não-terminais da forma
+
+\[
+  E \to E \oplus T \mid T
+\]
+
+(associatividade à esquerda) ou
+
+\[
+  E \to T \oplus E \mid T
+\]
+
+(associatividade à direita), a biblioteca oferece os combinadores
+\haskell{chainl} e \haskell{chainr}:
+
+\begin{minted}{haskell}
+chainr  ::  Parser s a -> Parser s (a -> a -> a) -> Parser s a
+chainr pe po  =  h <$> many (j <$> pe <*> po) <*> pe
+  where j x op  =  (x `op`)
+        h fs x  =  foldr ($) x fs
+
+chainl  ::  Parser s a -> Parser s (a -> a -> a) -> Parser s a
+chainl pe po  =  h <$> pe <*> many (j <$> po <*> pe)
+  where j op x  =  (`op` x)
+        h x fs  =  foldl (flip ($)) x fs
+\end{minted}
+
+O argumento \haskell{pe} é o analisador para os
+operandos (expressões de nível mais alto) e
+\haskell{po} é o analisador para os operadores, que
+devolve uma \textbf{função binária} a ser aplicada aos operandos.
+
+Por exemplo, \haskell{chainl termParser opParser}
+reconhece a gramática
+
+\[
+  E \to E + T \mid T
+\]
+
+produzindo uma árvore associativa à esquerda: a expressão
+\haskell{1 + 2 + 3} é interpretada como
+\haskell{(1 + 2) + 3}.
+
+\section{O parser de expressões}
+
+Para ilustrar o uso da biblioteca, vamos examinar o analisador
+sintático para uma linguagem simples de expressões aritméticas com
+variáveis. A linguagem é dada pela seguinte gramática:
+
+\[
+  \begin{array}{lcl}
+    E & \to & E + T \mid T\\
+    T & \to & T * F \mid F\\
+    F & \to & n \mid x \mid (E)
+  \end{array}
+\]
+
+onde \(n\) representa literais inteiros e \(x\) representa
+identificadores. A implementação está dividida em dois estágios, como
+é habitual: a \textbf{análise léxica}, que converte a string de
+entrada em uma lista de tokens, e a \textbf{análise sintática}, que
+consome os tokens e produz uma AST.
+
+\subsection{Tokens e análise léxica}
+
+Os tokens da linguagem de expressões são definidos pelo tipo:
+
+\begin{minted}{haskell}
+data Token
+  = Id String
+  | Number Int
+  | Add
+  | Mult
+  | LParen
+  | RParen
+\end{minted}
+
+O analisador léxico é construído com os próprios combinadores da
+biblioteca. O lexer principal elimina espaços em branco e aplica
+\haskell{tokenLexer} repetidamente:
+
+\begin{minted}{haskell}
+lexer' :: Parser Char [Token]
+lexer' = (\_ x -> x) <$> spaces
+                        <*> many ((\x _ -> x) <$> tokenLexer <*> spaces)
+\end{minted}
+
+O analisador \haskell{tokenLexer} tenta reconhecer,
+em ordem, um identificador, um número ou um operador/delimitador.
+Para os operadores e delimitadores, utiliza-se uma tabela de
+associação entre caracteres e tokens:
+
+\begin{minted}{haskell}
+tokenLexer :: Parser Char Token
+tokenLexer = (Id <$> identifier) <|> number <|> tokenlex
+
+table :: [(Char, Token)]
+table = [('+', Add), ('*', Mult),
+         ('(', LParen), (')', RParen)]
+
+tokenlex :: Parser Char Token
+tokenlex = choice $ map (\(c,t) -> const t <$> symbol c) table
+\end{minted}
+
+O uso de \haskell{choice} com a tabela é um padrão
+limpo: para cada par \haskell{(c, t)} na tabela,
+construímos um parser que reconhece o caractere
+\haskell{c} e retorna o token
+\haskell{t}. \haskell{choice} combina
+todos esses parsers com \haskell{<|>}.
+
+A função \haskell{exprLexer} executa o lexer e extrai
+o único resultado esperado:
+
+\begin{minted}{haskell}
+exprLexer :: String -> [Token]
+exprLexer s
+  = case runParser lexer' s of
+      [] -> []
+      ((x, "" ):_) -> x
+      v -> error $ show v
+\end{minted}
+
+O padrão \haskell{(x, "")} garante que toda a entrada
+foi consumida; caso haja entrada residual, um erro é sinalizado.
+
+\subsection{A árvore de sintaxe abstrata}
+
+A AST para as expressões é representada pelo tipo algébrico:
+
+\begin{minted}{haskell}
+data Expr
+  = Var String
+  | Lit Int
+  | Expr :+: Expr
+  | Expr :*: Expr
+  deriving (Eq, Show)
+\end{minted}
+
+Os construtores \haskell{(:+:)} e
+\haskell{(:*:)} são operadores infixos definidos no
+tipo, o que torna o código do parser notavelmente próximo da gramática.
+
+\subsection{O combinador gen para gramáticas com operadores}
+
+Antes de apresentar o analisador sintático, é necessário introduzir o
+combinador auxiliar \haskell{gen}, definido em
+\verb|Parsing/Descendent/Expr.hs|:
+
+\begin{minted}{haskell}
+type Op s a = (s, a -> a -> a)
+
+gen :: Eq s => [Op s a] -> Parser s a -> Parser s a
+gen ops p = chainl p (choice (map f ops))
+  where
+    f (s,c) = const c <$> symbol s
+\end{minted}
+
+O tipo \haskell{Op s a} associa um símbolo
+\haskell{s} (um token) a uma função binária que
+combina dois valores do tipo \haskell{a}. O
+combinador \haskell{gen} recebe uma lista de tais
+associações e um parser para os operandos, e
+constrói um parser para
+expressões com os operadores dados, com
+associatividade à esquerda.
+
+Internamente, \haskell{gen} constrói o parser do
+operador com \haskell{choice (map f ops)}: para cada
+par \haskell{(s, c)}, cria um parser que consome o
+token \haskell{s} e retorna a função
+\haskell{c}. Em seguida, aplica
+\haskell{chainl} para obter a associatividade à esquerda.
+
+\subsection{O analisador sintático}
+
+O analisador para expressões segue a gramática com três níveis de precedência:
+
+\begin{minted}{haskell}
+exprParser :: Parser Token Expr
+exprParser = addtable `gen` termParser
+  where
+    addtable = [(Add, (:+:))]
+
+termParser :: Parser Token Expr
+termParser = multable `gen` factParser
+  where
+    multable = [(Mult, (:*:))]
+
+factParser :: Parser Token Expr
+factParser = numParser  <|>
+             varParser  <|>
+             parenExpr
+  where
+    parenExpr = pack lparen exprParser rparen
+    lparen = symbol LParen
+    rparen = symbol RParen
+\end{minted}
+
+A estrutura do parser espelha diretamente a gramática:
+
+\begin{itemize}
+  \item \haskell{exprParser} reconhece somas de termos
+    ($E \to T + E \,|\, T$). Utiliza \haskell{gen} com a
+    tabela de adição, tendo \haskell{termParser} como
+    analisador dos operandos.
+  \item \haskell{termParser} reconhece produtos de
+    fatores ($T \to F * T \,|\, F$). Utiliza
+    \haskell{gen} com a tabela de multiplicação,
+    tendo \haskell{factParser} como analisador dos operandos.
+  \item \haskell{factParser} reconhece fatores atômicos
+    ($F \to n \,|\, x \,|\, (E)$): literais inteiros,
+    variáveis ou expressões parentesadas.
+\end{itemize}
+
+Os analisadores para variáveis e números usam
+\haskell{sat} para verificar o construtor do token:
+
+\begin{minted}{haskell}
+varParser :: Parser Token Expr
+varParser = f <$> sat isVar
+  where
+    isVar (Id _) = True
+    isVar _      = False
+    f (Id v) = Var v
+    f _ = error "impossible!"
+
+numParser :: Parser Token Expr
+numParser = f <$> sat isNum
+  where
+    isNum (Number _) = True
+    isNum _ = False
+    f (Number n) = Lit n
+    f _          = error "impossible!"
+\end{minted}
+
+A função de entrada do parser converte a lista de tokens em um valor
+\haskell{Either}, retornando a AST ou uma mensagem de erro:
+
+\begin{minted}{haskell}
+expr :: [Token] -> Either String Expr
+expr ts
+  = case runParser exprParser ts of
+      ((t, []) : _) -> Right t
+      _             -> Left "Parse error"
+\end{minted}
+
+O padrão \haskell{(t, [])} novamente exige que toda a
+entrada tenha sido consumida.
+
+\section{O parser de expressões com Megaparsec}
+
+A biblioteca desenvolvida nas seções anteriores é didática, mas
+bibliotecas de produção vão além: oferecem mensagens de erro
+detalhadas, melhor desempenho e mais funcionalidades. O
+\textbf{Megaparsec} é a biblioteca de combinadores de parsing mais
+utilizada no ecossistema Haskell e segue os mesmos princípios
+conceituais que estudamos, porém com uma implementação muito mais
+robusta. O código discutido nesta seção está disponível em:
+\begin{flushleft}
+  \verb|Exp/Frontend/Lexer/Megaparsec/ExpLexer.hs| e\\
+  \verb|Exp/Frontend/Parser/Megaparsec/ExpParser.hs|.
+\end{flushleft}
+
+\subsection{O tipo Parser no Megaparsec}
+
+Nessa seção, vamos utilizar a biblioteca Megaparsec para definir um analisador
+descendente recursivo para a linguagem de expressões.
+Definimos o tipo \haskell{Parser} é definido como um alias para
+\haskell{Parsec Void String}:
+
+\begin{minted}{haskell}
+type Parser = Parsec Void String
+\end{minted}
+
+O tipo \haskell{Parsec e s a} do Megaparsec é
+parametrizado pelo tipo de \textbf{erro} \haskell|e|,
+pelo tipo de \textbf{entrada} \haskell{s} e pelo tipo
+do \textbf{resultado} \haskell{a}. Usando
+\haskell{Void} como tipo de erro customizado,
+indicamos que só utilizamos as mensagens de erro padrão da
+biblioteca. \haskell{String} é o tipo da entrada:
+uma lista de caracteres.
+
+\subsection{A análise léxica com Megaparsec}
+
+O Megaparsec separa claramente as responsabilidades léxicas das
+sintáticas. O módulo
+
+\verb|Exp.Frontend.Lexer.Megaparsec.ExpLexer|
+
+define os primitivos léxicos que o parser irá consumir.
+
+O primeiro componente é o \textbf{consumidor de espaço}
+\haskell{sc} (\emph{space consumer}):
+
+\begin{minted}{haskell}
+sc :: Parser ()
+sc = L.space space1 lineCmnt blockCmnt
+ where
+  lineCmnt  = L.skipLineComment "//"
+  blockCmnt = L.skipBlockComment "/*" "*/"
+\end{minted}
+
+\haskell{L.space} recebe três parsers: um para
+espaços em branco (\haskell{space1}, que consome um
+ou mais caracteres brancos), um para comentários de linha e um para
+comentários em bloco. Com isso, \haskell{sc} descarta
+silenciosamente espaços e ambas as formas de comentário.
+
+Sobre \haskell{sc}, é definido o combinador
+\haskell{lexeme}, que envolve qualquer parser
+consumindo automaticamente o espaço que o segue:
+
+\begin{minted}{haskell}
+lexeme :: Parser a -> Parser a
+lexeme = L.lexeme sc
+\end{minted}
+
+O padrão de uso é: cada parser léxico é definido com
+\haskell{lexeme}, garantindo que o espaço entre
+tokens seja descartado sem que o parser sintático
+precise se preocupar com isso.
+
+Os demais primitivos léxicos são diretos:
+
+\begin{minted}{haskell}
+symbol :: String -> Parser String
+symbol = L.symbol sc
+
+parens :: Parser a -> Parser a
+parens = between (symbol "(") (symbol ")")
+
+rword :: String -> Parser ()
+rword w = (lexeme . try) (string w *> notFollowedBy alphaNumChar)
+
+int :: Parser Int
+int = lexeme L.decimal
+\end{minted}
+
+\begin{itemize}
+  \item \haskell{symbol} reconhece uma string literal e
+    descarta o espaço seguinte.
+  \item \haskell{parens p} reconhece
+    \haskell{p} entre parênteses, usando
+    \haskell{between} do Megaparsec para combinar os
+    dois delimitadores com o conteúdo.
+  \item \haskell{rword} reconhece uma \textbf{palavra
+    reservada}: usa \haskell{try} para retroceder em
+    caso de falha e \haskell{notFollowedBy alphaNumChar}
+    para garantir que a palavra não seja prefixo de um
+    identificador maior.
+  \item \haskell{int} analisa um literal decimal inteiro,
+    descartando o espaço seguinte.
+\end{itemize}
+
+\subsection{O analisador sintático com makeExprParser}
+
+O analisador sintático importa do módulo
+\verb|Control.Monad.Combinators.Expr| a função
+\haskell{makeExprParser}, que é a versão de nível
+industrial do nosso \haskell{gen} combinado com
+\haskell{chainl}/\haskell{chainr}:
+
+\begin{minted}{haskell}
+import Control.Monad.Combinators.Expr
+\end{minted}
+
+A precedência e associatividade dos operadores são declaradas em uma
+\textbf{tabela de operadores}, organizada do maior para o menor nível
+de precedência (ou seja, os operadores que ligam mais forte vêm primeiro):
+
+\begin{minted}{haskell}
+opTable :: [[Operator Parser Exp]]
+opTable
+  = [ [ infixL (:*:) "*" ]
+    , [ infixL (:+:) "+" ]
+    ]
+ where
+  infixL op sym = InfixL $ op <$ symbol sym
+\end{minted}
+
+A tabela é uma lista de listas: cada lista interna agrupa operadores
+de mesma precedência. \haskell{(:*:)} aparece na
+primeira lista e \haskell{(:+:)} na segunda, logo
+\haskell{*} tem maior precedência que
+\haskell{+}. Dentro de cada grupo, os operadores têm
+a mesma precedência e a associatividade é determinada pelo construtor
+utilizado: \haskell{InfixL} para associatividade à esquerda.
+
+A função auxiliar \haskell{infixL} constrói uma
+entrada na tabela: \haskell{op <$ symbol sym}
+reconhece o símbolo \haskell{sym} e retorna a função
+construtora \haskell{op} (como \haskell{(:*:)}) como
+resultado, que será aplicada pelos dois operandos adjacentes.
+
+O parser para fatores atômicos é \haskell{termP}:
+
+\begin{minted}{haskell}
+termP :: Parser Exp
+termP = parens expP
+    <|> EInt <$> int
+\end{minted}
+
+\haskell{termP} tenta, em ordem: uma expressão entre
+parênteses (\haskell{parens expP}) ou um literal
+inteiro (\haskell{EInt <$> int}). Note que
+\haskell{termP} é mutuamente recursivo com
+\haskell{expP}: parênteses reiniciam o parsing a
+partir do nível mais alto da gramática.
+
+Finalmente, o parser principal é criado utilizando a tabela e o
+parser \haskell{termP}:
+
+\begin{minted}{haskell}
+expP :: Parser Exp
+expP = makeExprParser termP opTable
+\end{minted}
+
+\haskell{makeExprParser} recebe o parser
+\haskell{termP} e a tabela de operadores, e constrói
+automaticamente o parser para toda a hierarquia de precedências,
+evitando a necessidade de codificar manualmente cada nível como uma
+função separada.
+
+\subsection{A função principal de parsing}
+
+A função que executa o parser \haskell{expParser}
+sobre uma \haskell{String} é:
+
+\begin{minted}{haskell}
+expParser :: String -> Either String Exp
+expParser s = case parse expP "" s of
+                Left err -> Left (errorBundlePretty err)
+                Right e  -> Right e
+\end{minted}
+
+\haskell{parse} é a função de execução do Megaparsec:
+recebe o parser, um nome de arquivo (aqui
+\haskell{""}, pois não há arquivo físico) e a
+entrada. Em caso de falha,
+\haskell{errorBundlePretty} formata a mensagem de
+erro de forma legível, com indicação de linha, coluna e o que era
+esperado. Em caso de sucesso, a AST é retornada em
+\haskell{Right}.
+
+\section{Análise de linguagens sensíveis à indentação}
+
+\subsection{O problema da indentação}
+
+Linguagens como Python e Haskell usam a \textbf{indentação} para
+delimitar blocos em vez de palavras-chave como \texttt{begin}/\texttt{end}
+ou chaves. Por exemplo, o trecho Python
+
+\begin{minted}{python}
+x = 5
+if x > 0:
+    y = x + 1
+    if y > 3:
+        z = y * 2
+    else:
+        z = 0
+\end{minted}
+
+\noindent define dois blocos aninhados exclusivamente pela coluna em que cada
+linha começa. Essa característica torna a gramática dependente do
+contexto de posição, algo que os analisadores puramente baseados em
+tokens não tratam diretamente.
+
+O desafio é que um consumidor de espaços convencional descarta
+quebras de linha e indentação antes que o parser possa examiná-las.
+É necessário, portanto, separar os dois papéis: espaço \emph{dentro}
+de uma linha (ignorado normalmente) e espaço \emph{entre} linhas
+(portador de informação estrutural).
+
+\subsection{Dois consumidores de espaço}
+
+A estratégia central do Megaparsec para lidar com indentação é manter
+\textbf{dois} consumidores de espaço distintos:
+
+\begin{minted}{haskell}
+import qualified Text.Megaparsec.Char.Lexer as L
+
+-- Consome espaços e tabulações, mas NÃO quebras de linha.
+-- Usado dentro de uma única linha.
+sc :: Parser ()
+sc = L.space
+       (void $ takeWhile1P Nothing (\c -> c == ' ' || c == '\t'))
+       (L.skipLineComment "--")
+       empty
+
+-- Consome qualquer espaço em branco, incluindo quebras de linha.
+-- Usado ENTRE linhas (entre itens de um bloco).
+scn :: Parser ()
+scn = L.space space1 (L.skipLineComment "--") empty
+
+lexeme :: Parser a -> Parser a
+lexeme = L.lexeme sc   -- espaço pós-token dentro da linha
+\end{minted}
+
+A regra de uso é simples: \haskell{lexeme} (e \haskell{sc}) são usados
+para consumir espaço após cada token léxico dentro de uma linha;
+\haskell{scn} é passado aos combinadores de indentação, que o usam
+para saltar de uma linha para a próxima enquanto verificam a coluna.
+
+\subsection{Os combinadores de indentação do Megaparsec}
+
+O módulo \texttt{Text.Megaparsec.Char.Lexer} fornece três combinadores
+principais para parsing sensível à indentação.
+
+\textbf{indentLevel.} Devolve a coluna corrente como um valor do
+tipo \haskell{Pos} (posição começando em 1):
+
+\begin{minted}{haskell}
+indentLevel :: MonadParsec e s m => m Pos
+\end{minted}
+
+\textbf{indentGuard.} Exige que a próxima linha não-vazia comece com
+uma relação de ordem especificada em relação a uma coluna de referência:
+
+\begin{minted}{haskell}
+indentGuard :: MonadParsec e s m
+            => m ()      -- consumidor de espaço (com newlines)
+            -> Ordering  -- GT, EQ ou LT
+            -> Pos       -- coluna de referência
+            -> m Pos     -- devolve a coluna efetiva do próximo token
+\end{minted}
+
+Por exemplo, \haskell{indentGuard scn GT ref} consome espaços e
+quebras de linha e então falha se o próximo token não estiver
+\emph{estritamente} à direita da coluna \haskell{ref}.
+
+\textbf{indentBlock.} É o combinador de mais alto nível: parseia um
+cabeçalho de bloco e em seguida todos os itens indentados abaixo
+dele, verificando automaticamente a consistência de coluna:
+
+\begin{minted}{haskell}
+indentBlock :: (MonadParsec e s m, Token s ~ Char)
+            => m ()                -- scn: pula linhas entre itens
+            -> m (IndentOpt m a b) -- parser do cabeçalho
+            -> m a
+
+data IndentOpt m a b
+  = IndentNone a
+      -- Sem bloco: o cabeçalho produz diretamente 'a'.
+  | IndentMany (Maybe Pos) ([b] -> m a) (m b)
+      -- Zero ou mais itens. Maybe Pos = coluna esperada (Nothing = inferida).
+  | IndentSome (Maybe Pos) ([b] -> m a) (m b)
+      -- Um ou mais itens.
+\end{minted}
+
+O funcionamento de \haskell{indentBlock scn p} é:
+\begin{enumerate}
+  \item Executa \haskell{p} para parsear o cabeçalho e obter um
+    \haskell{IndentOpt}.
+  \item Se o resultado for \haskell{IndentNone a}, devolve \haskell{a}
+    sem tentar parsear um bloco.
+  \item Se for \haskell{IndentMany} ou \haskell{IndentSome}, usa
+    \haskell{scn} para avançar até o primeiro item e registra sua
+    coluna como referência do bloco. Cada item subsequente deve começar
+    exatamente na mesma coluna; qualquer desvio encerra o bloco.
+\end{enumerate}
+
+\subsection{Exemplo: uma linguagem similar ao Python}
+
+Para ilustrar o uso dos combinadores, consideramos uma linguagem
+mínima com atribuições, \texttt{if-else} e \texttt{while}:
+
+\begin{minted}{haskell}
+data Stmt
+  = Assign String Expr
+  | If Expr [Stmt] (Maybe [Stmt])
+  | While Expr [Stmt]
+  deriving Show
+
+data Expr
+  = Var String
+  | Lit Int
+  | BinOp BinOp Expr Expr
+  deriving Show
+
+data BinOp = Add | Sub | Mul | Lt | Gt | Eq deriving Show
+\end{minted}
+
+\textbf{Primitivos léxicos.} Definimos identificadores e inteiros
+usando \haskell{lexeme} (que já não consome quebras de linha):
+
+\begin{minted}{haskell}
+rword :: String -> Parser ()
+rword w = (lexeme . try) (string w *> notFollowedBy alphaNumChar)
+
+identifier :: Parser String
+identifier = (lexeme . try) $ do
+  first <- letterChar
+  rest  <- many alphaNumChar
+  let name = first : rest
+  if name `elem` ["if","else","while"]
+    then fail ("palavra reservada: " ++ name)
+    else return name
+
+intLit :: Parser Int
+intLit = lexeme L.decimal
+\end{minted}
+
+\textbf{Expressões.} Por simplicidade, usamos
+\haskell{makeExprParser} sem repetir a hierarquia completa:
+
+\begin{minted}{haskell}
+expr :: Parser Expr
+expr = makeExprParser atom opTable
+  where
+    atom = (Var <$> identifier)
+       <|> (Lit <$> intLit)
+       <|> between (symbol "(") (symbol ")") expr
+    opTable =
+      [ [InfixL (BinOp Mul <$ symbol "*")]
+      , [InfixL (BinOp Add <$ symbol "+")
+        ,InfixL (BinOp Sub <$ symbol "-")]
+      , [InfixN (BinOp Lt  <$ symbol "<")
+        ,InfixN (BinOp Gt  <$ symbol ">")
+        ,InfixN (BinOp Eq  <$ symbol "==")]
+      ]
+\end{minted}
+
+\textbf{Bloco de declarações.} O combinador central usa
+\haskell{indentBlock} com \haskell{IndentSome} para exigir pelo
+menos um item, inferindo a coluna de referência pelo primeiro item:
+
+\begin{minted}{haskell}
+block :: Parser [Stmt]
+block = L.indentBlock scn (return (L.IndentSome Nothing return stmt))
+\end{minted}
+
+\textbf{Declarações.} Cada declaração é parseada com
+\haskell{sc} (não consome newlines) e ao final consume o restante
+da linha com \haskell{scn}:
+
+\begin{minted}{haskell}
+stmt :: Parser Stmt
+stmt = ifStmt <|> whileStmt <|> assignStmt
+
+ifStmt :: Parser Stmt
+ifStmt = L.indentBlock scn $ do
+  rword "if"
+  cond <- expr
+  symbol ":"
+  return (L.IndentSome Nothing (mkIf cond) stmt)
+  where
+    mkIf cond body = do
+      elseBody <- optional (L.indentBlock scn elseP)
+      return (If cond body elseBody)
+    elseP = do
+      L.indentGuard scn EQ =<< L.indentLevel
+      rword "else"
+      symbol ":"
+      return (L.IndentSome Nothing return stmt)
+
+whileStmt :: Parser Stmt
+whileStmt = L.indentBlock scn $ do
+  rword "while"
+  cond <- expr
+  symbol ":"
+  return (L.IndentSome Nothing (return . While cond) stmt)
+
+assignStmt :: Parser Stmt
+assignStmt = do
+  name <- identifier
+  symbol "="
+  e    <- expr
+  scn
+  return (Assign name e)
+\end{minted}
+
+\textbf{Programa completo.} Um programa é uma lista de declarações
+ao nível mais externo (coluna 1), separadas por \haskell{scn}:
+
+\begin{minted}{haskell}
+program :: Parser [Stmt]
+program = scn *> many (L.nonIndented scn stmt) <* eof
+\end{minted}
+
+O combinador \haskell{L.nonIndented scn p} garante que \haskell{p}
+começa exatamente na coluna 1, levantando um erro de indentação caso
+contrário.
+
+\textbf{Exemplo de parsing.} Para a entrada
+
+\begin{minted}{python}
+x = 5
+if x > 0:
+    y = x + 1
+    while y > 0:
+        y = y - 1
+\end{minted}
+
+\noindent o parser produz a AST
+
+\begin{minted}{haskell}
+[ Assign "x" (Lit 5)
+, If (BinOp Gt (Var "x") (Lit 0))
+     [ Assign "y" (BinOp Add (Var "x") (Lit 1))
+     , While (BinOp Gt (Var "y") (Lit 0))
+             [Assign "y" (BinOp Sub (Var "y") (Lit 1))]
+     ]
+     Nothing
+]
+\end{minted}
+
+\subsection{Vantagens e limitações da abordagem}
+
+A abordagem com \haskell{indentBlock} tem as seguintes
+características:
+
+\begin{itemize}
+  \item \textbf{Integração natural.} A indentação é verificada como
+    parte do próprio parsing, sem pré-processamento separado.
+  \item \textbf{Mensagens de erro precisas.} O Megaparsec reporta linha
+    e coluna exatas quando a indentação está incorreta.
+  \item \textbf{Flexibilidade.} É possível combinar blocos indentados
+    com outras formas de delimitação (como parênteses em Haskell) no
+    mesmo parser.
+  \item \textbf{Limitação.} A abordagem funciona bem para bloco único
+    por nível, mas casos mais complexos (como a regra de layout
+    completa de Haskell) requerem um pré-processamento léxico explícito
+    de tokens de indentação, descrito no capítulo sobre geradores de
+    analisadores sintáticos.
+\end{itemize}
+
+\section{Conclusão}
+
+Este capítulo apresentou os combinadores de parsing como uma
+abordagem funcional para a construção de analisadores sintáticos
+recursivos descendentes. A ideia central, representar um parser
+como uma função de listas de símbolos para listas de resultados,
+permite instanciar o tipo \haskell{Parser} nas
+classes \haskell{Functor},
+\haskell{Applicative},
+\haskell{Alternative} e \haskell{Monad}.
+
+A partir dos primitivos \haskell{item} e
+\haskell{sat}, construímos combinadores de alto nível
+como \haskell{many},
+\haskell{option}, \haskell{pack},
+\haskell{chainl} e \haskell{chainr}.
+Esses combinadores foram aplicados para construir um analisador
+léxico e um analisador sintático para uma linguagem de expressões
+aritméticas, demonstrando como a estrutura da gramática se reflete
+diretamente na estrutura do código Haskell.
+
+A combinação de \haskell{gen} com
+\haskell{chainl} resolve elegantemente o problema
+clássico da recursão à esquerda em gramáticas de operadores, sem a
+necessidade de transformar a gramática original. O resultado é um
+analisador conciso, legível e corretamente associativo que serve de
+base para o frontend de um compilador.
+
+Por fim, apresentamos o mesmo parser de expressões reescrito com o
+\textbf{Megaparsec}, uma biblioteca de produção que compartilha os
+mesmos fundamentos conceituais, mas oferece mensagens de erro
+detalhadas (com linha, coluna e contexto), tratamento automático de
+espaço em branco via \haskell{lexeme} e o combinador
+\haskell{makeExprParser} para declarar hierarquias de
+precedência de forma compacta através de uma tabela de operadores. A
+principal diferença comportamental é a semântica de \emph{committed
+choice} do operador \haskell{<|>}: ao contrário da
+biblioteca desenvolvida neste capítulo, o Megaparsec só tenta a
+alternativa direita se a esquerda falhou sem consumir entrada, o que
+torna o parser eficiente e as mensagens de erro mais precisas.

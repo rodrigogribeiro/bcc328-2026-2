@@ -1,0 +1,122 @@
+\documentclass[10pt, a4paper, openany]{book}
+
+% basic packages
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[brazil]{babel}
+\usepackage[a4paper,
+        top=3cm, bottom=3cm,
+left=3cm, right=2.5cm]{geometry}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{1.5em}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{amsfonts}
+\usepackage{stmaryrd}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{minted}
+\usepackage{xcolor}
+\usepackage{proof}
+\usepackage{float}
+\usepackage{tcolorbox}
+\usepackage{algorithm}
+\usepackage{algpseudocodex}
+
+% tikz configurations
+
+\usepackage{tikz}
+\usetikzlibrary{automata, positioning, arrows.meta, shapes.geometric,
+fit, backgrounds}
+\definecolor{lstback}{rgb}{0.97, 0.97, 0.97}
+\definecolor{lstcomment}{rgb}{0.40, 0.40, 0.40}
+\definecolor{lstkeyword}{rgb}{0.00, 0.30, 0.70}
+\definecolor{lststring}{rgb}{0.50, 0.00, 0.50}
+\definecolor{lstnumber}{rgb}{0.50, 0.50, 0.50}
+\usepackage{newunicodechar}
+\newunicodechar{λ}{\ensuremath{\lambda}}
+
+% more basic package configs
+
+\usepackage[colorlinks = true,
+        linkcolor  = blue!70!black,
+        urlcolor   = blue!70!black,
+citecolor  = green!50!black]{hyperref}
+
+\newtheorem{Definition}{Definição}[chapter]
+\newtheorem{Theorem}{Teorema}[chapter]
+\newtheorem{Lemma}{Lema}
+\newtheorem{corollary}{Corolário}
+\newtheorem{example}{Exemplo}[chapter]
+\theoremstyle{remark}
+\newtheorem*{remark}{Observação}
+
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+{\normalfont\huge\bfseries}
+{\chaptertitlename\ \thechapter}{12pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{20pt}{16pt}
+
+% commands
+
+\newcommand{\haskell}[1]{\mintinline{haskell}{#1}}
+\newcommand{\asm}[1]{\mintinline{asm}{#1}}
+\newcommand{\javascript}[1]{\mintinline{javascript}{#1}}
+\newcommand{\cpp}[1]{\mintinline{cpp}{#1}}
+
+\title{%
+        \vspace{2cm}
+        {\Huge\bfseries Notas de Aulas\\[0.5em] de Compiladores}\\[1em]
+        \large Universidade Federal de Ouro Preto
+}
+\author{Rodrigo Ribeiro}
+\date{}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+\part{Introdução}
+\include{chapters/chapter01}
+\part{Análise léxica}
+\include{chapters/chapter02}
+\include{chapters/chapter03}
+\include{chapters/chapter04}
+\part{Análise sintática}
+\include{chapters/chapter05}
+\include{chapters/chapter06}
+\include{chapters/chapter07}
+\include{chapters/chapter08}
+\include{chapters/chapter09}
+\include{chapters/chapter10}
+\include{chapters/chapter11}
+\part{Semântica formal e interpretadores}
+\include{chapters/chapter12}
+\include{chapters/chapter13}
+\include{chapters/chapter14}
+\part{Sistemas e verificação de tipos}
+\include{chapters/chapter15}
+\include{chapters/chapter16}
+\part{Geração de código intermediário}
+\include{chapters/chapter17}
+\include{chapters/chapter18}
+\part{Geração de código executável}
+\include{chapters/chapter19}
+\include{chapters/chapter20}
+% \include{chapters/chapter25}
+% \include{chapters/chapter26}
+% \include{chapters/chapter27}
+\part{Tópicos adicionais}
+\include{chapters/chapter21}
+\include{chapters/chapter22}
+\include{chapters/chapter23}
+%\include{chapters/chapter24}
+
+\end{document}

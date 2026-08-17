@@ -1,0 +1,1113 @@
+\chapter{O $\lambda$-cálculo}
+
+\section{Introdução}
+
+O \textbf{$\lambda$-cálculo} é a linguagem de programação mais simples
+que ainda captura a essência da computação por funções. Formulado por
+Alonzo Church na década de 1930, ele consiste em apenas três
+construções: variáveis, abstrações (funções anônimas) e aplicações
+(chamadas de função). Apesar dessa aparente simplicidade, o cálculo
+lambda não tipado é Turing-completo, qualquer função computável
+pode ser expressa nele.
+
+Neste capítulo, estudamos o $\lambda$-cálculo em duas formas. Primeiro,
+apresentamos a versão \textbf{não tipada}, definindo sua sintaxe e as
+semânticas big-step e small-step na estratégia \emph{call-by-value}.
+Em seguida, o estendemos com valores booleanos e um sistema de tipos
+simples (o \textbf{$\lambda$-cálculo simplesmente tipado}) e
+demonstramos que esse sistema satisfaz as propriedades de progresso e
+preservação. Por fim, apresentamos a implementação em Haskell do
+interpretador para a versão não tipada.
+
+\section{O $\lambda$-cálculo Não Tipado}
+
+\subsection{Sintaxe}
+
+A gramática do $\lambda$-cálculo não tipado tem três produções:
+
+\[
+  \begin{array}{rcll}
+    t & ::= & x & \text{variável} \\
+    & |   & \lambda x.\, t & \text{abstração} \\
+    & |   & t\, t   & \text{aplicação}
+\end{array} \]
+
+Usamos as letras \(x, y, z, \ldots\) para variáveis e \(t, s, u,
+\ldots\) para termos genéricos. Duas convenções de precedência tornam
+a notação menos carregada de parênteses:
+
+\begin{itemize}
+  \item A \textbf{aplicação} é associativa à esquerda: \(t_1\, t_2\,
+    t_3\) significa \((t_1\, t_2)\, t_3\).
+  \item O \textbf{corpo de uma abstração} se estende o máximo possível à
+    direita: \(\lambda x.\, t_1\, t_2\) significa \(\lambda
+    x.\,(t_1\, t_2)\), não \((\lambda x.\, t_1)\, t_2\).
+\end{itemize}
+
+Abstrações com múltiplos parâmetros são abreviadas: \(\lambda x\,
+y.\, t\) significa \(\lambda x.\,\lambda y.\, t\).
+
+Uma \textbf{ocorrência livre} de \(x\) em \(t\) é uma ocorrência que
+não está no escopo de nenhuma abstração \(\lambda x\). Um termo sem
+variáveis livres é dito \textbf{fechado} (também chamado de
+\emph{combinador}). O subconjunto de termos fechados é o que
+consideraremos para avaliação.
+
+\subsection{Valores}
+
+Na estratégia call-by-value, os únicos \textbf{valores} são as
+abstrações, que são as formas normais do cálculo. Variáveis e
+aplicações só são valores se toda redução possível já foi realizada,
+o que para termos fechados equivale a ser uma abstração:
+
+\[
+  \begin{array}{rcll} v & ::= & \lambda x.\, t & \text{(valor)}
+  \end{array}
+\]
+
+\subsection{Semântica Big-Step Call-by-Value}
+
+A semântica big-step define uma relação \(t \Downarrow v\) que
+expressa que o termo \(t\) \textbf{avalia} ao valor \(v\) em um
+número finito de passos. A estratégia call-by-value impõe que o
+argumento de uma aplicação seja reduzido a um valor \textbf{antes} de
+realizar a substituição (ao contrário de call-by-name, que substitui
+o argumento sem avaliá-lo).
+
+\[ \dfrac{}{\lambda x.\, t\ \Downarrow\ \lambda x.\, t} \quad\text{(B-Lam)}
+\]
+
+\[ \dfrac{ t_1 \Downarrow \lambda x.\, t \qquad t_2 \Downarrow v_2 \qquad t[x
+\mapsto v_2] \Downarrow v }{ t_1\, t_2\ \Downarrow\ v } \quad\text{(B-App)} \]
+
+A regra (B-Lam) expressa que uma abstração já é um valor: ela avalia
+a si mesma. A regra (B-App) descreve os três passos de uma chamada de
+função: avalia a função \(t_1\) até obter uma abstração \(\lambda
+x.\, t\), avalia o argumento \(t_2\) até obter um valor \(v_2\), e
+então avalia o corpo \(t\) com \(x\) substituído por \(v_2\).
+
+A \textbf{substituição} \(t[x \mapsto v]\) é definida recursivamente
+sobre a estrutura de \(t\):
+
+\[
+  \begin{array}{rcl}
+    x[x \mapsto v] & = & v \\
+    y[x \mapsto v] & = & y \quad (y \neq x) \\
+    (\lambda x.\, t)[x \mapsto v] & = & \lambda x.\, t \\
+    (\lambda y.\, t)[x \mapsto v] & = & \lambda y.\, (t[x \mapsto v]) \quad (y
+    \neq x,\; y \notin \mathrm{fv}(v)) \\
+    (t_1\, t_2)[x \mapsto v] & = & (t_1[x
+    \mapsto v])\,(t_2[x \mapsto v])
+\end{array} \]
+
+A condição \(y \notin \mathrm{fv}(v)\) na regra para abstrações evita
+a \textbf{captura de variável}: se \(y\) ocorre livre em \(v\), é
+necessário primeiro renomear \(y\) para uma nova variável
+(\(\alpha\)-conversão).
+
+Como exemplo, considere a avaliação do combinador identidade aplicado
+a si mesmo:
+
+\[ \dfrac{ \lambda x.\, x \Downarrow \lambda x.\, x \qquad \lambda x.\, x
+    \Downarrow \lambda x.\, x \qquad (\lambda x.\, x)[x \mapsto
+    \lambda x.\, x] =
+  \lambda x.\, x \Downarrow \lambda x.\, x }{ (\lambda x.\, x)\,(\lambda x.\,
+x) \Downarrow \lambda x.\, x } \quad\text{(B-App)} \]
+
+\subsection{Semântica Small-Step Call-by-Value}
+
+A semântica small-step define uma relação \(t \to t'\) que decompõe a
+avaliação em passos elementares. É composta por uma \textbf{regra de
+computação} e duas \textbf{regras de congruência}:
+
+\textbf{Regra de computação (\(\beta\)-redução call-by-value):}
+
+\[ \dfrac{}{(\lambda x.\, t_1)\, v_2 \to t_1[x \mapsto v_2]}
+\quad\text{(E-Beta)} \]
+
+A regra (E-Beta) só se aplica quando o argumento \(v_2\) já é um
+valor, o que constitui a essência da estratégia call-by-value.
+
+\textbf{Regras de congruência:}
+
+\[ \dfrac{t_1 \to t_1'}{t_1\, t_2 \to t_1'\, t_2} \quad\text{(E-App1)} \qquad
+\dfrac{t_2 \to t_2'}{v_1\, t_2 \to v_1\, t_2'} \quad\text{(E-App2)} \]
+
+As regras de congruência determinam a \textbf{ordem de avaliação}:
+(E-App1) reduz a função antes de olhar para o argumento; (E-App2) só
+é aplicável quando a função já é um valor \(v_1\), e reduz o
+argumento. Somente depois que ambos forem valores é que (E-Beta) pode disparar.
+
+A sequência de reduções para o mesmo exemplo anterior é:
+
+\[ (\lambda x.\, x)\,(\lambda x.\, x) \;\xrightarrow{\text{E-Beta}}\;
+\lambda x.\, x \]
+
+Como ambos os subtermos já são valores, a única regra aplicável é
+(E-Beta) diretamente.
+
+Um exemplo com mais passos, usando o combinador de aplicação
+\(K = \lambda x.\,\lambda y.\,
+x\):
+
+\[ K\,(\lambda z.\,z)\,(\lambda w.\,w) \;\xrightarrow{\text{E-App1,
+  E-Beta}}\; (\lambda y.\, \lambda z.\,z)\,(\lambda w.\,w)
+\;\xrightarrow{\text{E-Beta}}\; \lambda z.\,z \]
+
+Um termo é dito \textbf{preso} (\emph{stuck}) quando não é um
+valor e nenhuma regra de redução se aplica a ele. No $\lambda$-cálculo
+não tipado, uma variável livre é um exemplo de termo preso. A
+versão tipada que estudamos a seguir elimina essa possibilidade para
+termos bem tipados.
+
+\section{$\lambda$-cálculo Simplesmente Tipado com Booleanos}
+
+Estendemos o $\lambda$-cálculo com valores booleanos e um sistema de
+tipos simples. Esta extensão, conhecida como \textbf{STLC+Bool}
+(Simply Typed Lambda Calculus with Booleans), é um dos exemplos
+fundamentais na teoria de tipos.
+
+\subsection{Sintaxe Estendida}
+
+Os tipos são:
+
+\[
+  \begin{array}{rcll}
+    T & ::= & \mathbf{Bool} & \text{tipo booleano} \\
+    & |   & T \to T & \text{tipo funcional}
+\end{array} \]
+
+Os termos são estendidos com os três construtores booleanos, e as
+abstrações passam a carregar uma anotação de tipo no parâmetro:
+
+\[
+  \begin{array}{rcll} t & ::= & x & \text{variável} \\ & | & \lambda x {:}
+    T.\, t & \text{abstração tipada} \\ & | & t\ t & \text{aplicação} \\ & | &
+    \mathbf{true} & \text{constante verdadeiro} \\ & | & \mathbf{false} &
+    \text{constante falso} \\ & | & \mathbf{if}\, t\, \mathbf{then}\, t\,
+    \mathbf{else}\, t & \text{condicional}
+\end{array} \]
+
+Os valores são:
+
+\[
+  \begin{array}{rcll} v & ::= & \lambda x {:} T.\, t & \text{abstração} \\
+    & | & \mathbf{true} & \\ & | & \mathbf{false} &
+\end{array} \]
+
+\subsection{Sistema de Tipos}
+
+O sistema de tipos é definido por um \textbf{contexto} \(\Gamma\),
+que é uma função parcial de variáveis para tipos, e pela relação de
+tipagem \(\Gamma \vdash t : T\), lida como
+``no contexto \(\Gamma\), o termo \(t\) tem tipo \(T\)''. As seis
+regras de inferência são:
+
+\[ \dfrac{}{\Gamma \vdash \mathbf{true} : \mathbf{Bool}} \;\text{(T-True)}
+  \qquad \dfrac{}{\Gamma \vdash \mathbf{false} : \mathbf{Bool}}
+\;\text{(T-False)} \]
+
+\[ \dfrac{x : T \in \Gamma}{\Gamma \vdash x : T} \;\text{(T-Var)} \]
+
+\[ \dfrac{\Gamma,\, x : T_1 \vdash t : T_2} {\Gamma \vdash \lambda x {:}
+T_1.\, t : T_1 \to T_2} \;\text{(T-Abs)} \]
+
+\[ \dfrac{\Gamma \vdash t_1 : T_1 \to T_2 \qquad \Gamma \vdash t_2 : T_1}
+{\Gamma \vdash t_1\, t_2 : T_2} \;\text{(T-App)} \]
+
+\[ \dfrac{ \Gamma \vdash t_1 : \mathbf{Bool} \qquad \Gamma \vdash t_2 : T
+  \qquad \Gamma \vdash t_3 : T }{ \Gamma \vdash \mathbf{if}\ t_1\ \mathbf{then}\
+t_2\ \mathbf{else}\ t_3 : T } \;\text{(T-If)} \]
+
+A notação \(\Gamma, x : T\) denota o contexto obtido estendendo
+\(\Gamma\) com a ligação \(x : T\). Escrevemos \(\vdash t : T\) (sem
+\(\Gamma\)) quando o contexto é vazio; neste caso, \(t\) é um termo fechado.
+
+Dois exemplos de derivações. O combinador identidade para booleanos
+\(\lambda x \{:\} \mathbf{Bool}., x\) tem
+tipo \(\mathbf{Bool} \to \mathbf{Bool}\):
+
+\[ \dfrac{ \dfrac{x : \mathbf{Bool} \in \{x : \mathbf{Bool}\}} {x :
+  \mathbf{Bool} \vdash x : \mathbf{Bool}} \;\text{(T-Var)} }{ \vdash \lambda x
+  {:} \mathbf{Bool}.\, x : \mathbf{Bool} \to \mathbf{Bool} } \;\text{(T-Abs)}
+\]
+
+A função \(\lambda f \{:\} \mathbf{Bool} \to
+  \mathbf{Bool}.\, f\,
+\mathbf{true}\) tem tipo \((\mathbf{Bool}
+\to \mathbf{Bool}) \to \mathbf{Bool}\):
+
+\[ \dfrac{ \dfrac{f : \mathbf{Bool} \to \mathbf{Bool} \in \Gamma'} {\Gamma'
+    \vdash f : \mathbf{Bool} \to \mathbf{Bool}} \quad \dfrac{}{\Gamma' \vdash
+  \mathbf{true} : \mathbf{Bool}} }{ \vdash \lambda f {:} \mathbf{Bool} \to
+    \mathbf{Bool}.\, f\, \mathbf{true} : (\mathbf{Bool} \to \mathbf{Bool}) \to
+\mathbf{Bool} } \]
+
+onde \(\Gamma' = f : \mathbf{Bool} \to \mathbf{Bool}\).
+
+\subsection{Semântica Small-Step}
+
+A semântica small-step do STLC+Bool estende as regras do cálculo não
+tipado com as regras para condicionais:
+
+\[ \dfrac{}{(\lambda x {:} T.\, t_1)\, v_2 \to t_1[x \mapsto v_2]}
+\;\text{(E-Beta)} \]
+
+\[ \dfrac{t_1 \to t_1'}{t_1\, t_2 \to t_1'\, t_2} \;\text{(E-App1)} \qquad
+\dfrac{t_2 \to t_2'}{v_1\, t_2 \to v_1\, t_2'} \;\text{(E-App2)} \]
+
+\[ \dfrac{}{\mathbf{if}\ \mathbf{true}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3
+\to t_2} \;\text{(E-IfTrue)} \]
+
+\[ \dfrac{}{\mathbf{if}\ \mathbf{false}\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3
+\to t_3} \;\text{(E-IfFalse)} \]
+
+\[ \dfrac{t_1 \to t_1'} {\mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\
+  t_3 \to \mathbf{if}\ t_1'\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3}
+\;\text{(E-If)} \]
+
+\subsection{Formas Canônicas}
+
+Antes das demonstrações de progresso e preservação, precisamos de um
+lema que relaciona valores a tipos. O \textbf{lema das formas
+canônicas} afirma que os únicos valores de cada tipo têm a forma esperada.
+
+\textbf{Lema (Formas Canônicas).} Seja \(v\) um valor com \(\vdash v : T\).
+
+\begin{enumerate}
+  \item Se \(T = \mathbf{Bool}\), então \(v = \mathbf{true}\) ou
+    \(v = \mathbf{false}\).
+  \item Se \(T = T_1 \to T_2\), então \(v = \lambda x {:} T_1.\, t\) para
+    algum \(x\) e \(t\).
+\end{enumerate}
+
+\emph{Demonstração.} Direta por inspeção das regras de tipagem. Os
+únicos valores são \(\mathbf{true}\), \(\mathbf{false}\) e \(\lambda
+x {:} T_1.\, t\). A regra (T-True) atribui tipo \(\mathbf{Bool}\) a
+\(\mathbf{true}\); a regra (T-False) atribui tipo \(\mathbf{Bool}\) a
+\(\mathbf{false}\); a regra (T-Abs) atribui tipo \(T_1 \to T_2\) a
+\(\lambda x {:} T_1.\, t\). Nenhum outro valor pode ter
+\(\mathbf{Bool}\) ou um tipo funcional.
+
+\subsection{Progresso}
+
+O teorema de progresso garante que um programa bem tipado fechado
+nunca fica preso: ele ou já é um valor, ou pode dar mais um passo
+de redução.
+
+\textbf{Teorema (Progresso).} Se \(\vdash t : T\) (com contexto
+vazio), então \(t\) é um valor ou \(\exists\, t'\) tal que \(t \to t'\).
+
+\emph{Demonstração.} Por indução estrutural sobre a derivação de
+\(\vdash t : T\).
+
+\textbf{Caso (T-True):} \(t = \mathbf{true}\) é um valor.
+
+\textbf{Caso (T-False):} \(t = \mathbf{false}\) é um valor.
+
+\textbf{Caso (T-Var):} \(t = x\). Este caso não pode ocorrer, pois
+\(\Gamma = \emptyset\) implica que nenhuma
+variável tem tipo definido.
+
+\textbf{Caso (T-Abs):} \(t = \lambda x {:} T_1.\, t_1\) é um valor.
+
+\textbf{Caso (T-App):} \(t = t_1\, t_2\), com \(\vdash t_1 : T_1 \to
+T_2\) e \(\vdash t_2 : T_1\). Pela hipótese de indução aplicada a \(t_1\):
+
+\begin{itemize}
+  \item
+    \emph{Subcaso \(t_1 \to t_1'\):} Por (E-App1), temos
+    \(t\_1\, t\_2 \to t\_1', t\_2\).
+  \item
+    \emph{Subcaso \(t_1\) é um valor:} Pela hipótese de indução
+    aplicada a \(t_2\):
+
+    \begin{itemize}
+      \item
+        \emph{Subcaso \(t_2 \to t_2'\):} Por (E-App2), temos
+        \(t\_1\, t\_2 \to
+        t\_1\, t\_2'\).
+      \item
+        \emph{Subcaso \(t_2\) é um valor:} Como \(t_1\) é um valor
+        com tipo \(T\_1 \to T\_2\), o Lema
+        das Formas Canônicas (item 2) garante que \(t\_1
+        = \lambda x \{:\} T\_1.\, t\).
+        Logo, por (E-Beta): \[ (\lambda x {:} T_1.\,
+        t)\, t_2 \to t[x \mapsto t_2] \]
+    \end{itemize}
+\end{itemize}
+
+Em todos os subcasos, \(t\) dá um passo de redução.
+
+\textbf{Caso (T-If):} \(t =
+  \mathbf{if}~t\_1~\mathbf{then}~t\_2~\mathbf{else}\\
+t\_3\), com \(\vdash t_1 : \mathbf{Bool}\). Pela
+hipótese de indução aplicada a \(t_1\):
+
+\begin{itemize}
+  \item
+    \emph{Subcaso \(t\_1 \to t\_1'\):} Por
+    (E-If): \[ \mathbf{if}\ t_1\ \mathbf{then}\
+      t_2\ \mathbf{else}\ t_3 \;\to\; \mathbf{if}\ t_1'\ \mathbf{then}\ t_2\
+    \mathbf{else}\ t_3 \]
+  \item
+    \emph{Subcaso \(t_1\) é um valor:} Como \(t_1 : \mathbf{Bool}\) é
+    um valor, o Lema das Formas Canônicas (item 1) garante que \(t_1
+    = \mathbf{true}\) ou \(t_1 = \mathbf{false}\). Em cada caso,
+    (E-IfTrue) ou (E-IfFalse) se aplica.
+\end{itemize}
+
+Em todos os subcasos, \(t\) dá um passo de redução.
+
+\subsection{Preservação}
+
+O teorema de preservação garante que a redução não altera o tipo do
+termo: se um termo bem tipado dá um passo, o resultado continua bem
+tipado com o mesmo tipo.
+
+Antes da demonstração, precisamos de um lema técnico fundamental
+sobre substituição.
+
+\textbf{Lema (Substituição).} Se \(\Gamma, x : T_1 \vdash t : T_2\) e
+\(\Gamma \vdash v : T\_1\), então \(\Gamma
+\vdash t[x \mapsto v] : T_2\).
+
+\emph{Demonstração (esboço).} Por indução estrutural sobre \(t\).
+
+\begin{itemize}
+  \item
+    \emph{\(t = x\):} A substituição produz \(v\), e
+    \(\Gamma \vdash v : T\_1 = T\_2\).
+  \item
+    \emph{\(t = y\) com \(y \neq x\):} A substituição não altera
+    \(y\), e \(y : T\_2 \in \Gamma\) ainda vale.
+  \item
+    \emph{\(t = \lambda y {:} T.\, t'\) com \(y \neq x\):} Por
+    hipótese, \(\Gamma, x : T\_1, y : T \vdash t' :
+    T\_2'\). Por hipótese de indução,
+    \(\Gamma, y : T \vdash t'{[}x \mapsto v{]} :
+    T\_2'\). Logo, pela regra (T-Abs),
+    \(\Gamma \vdash \lambda y \{:\} T.\,
+    t'{[}x \mapsto v{]} : T \to T\_2'\).
+  \item
+    \emph{\(t = t_a\, t_b\):} Por hipótese, \(\Gamma, x
+    : T\_1 \vdash t\_a : T \to T\_2\) e \(\Gamma, x :
+    T_1 \vdash t_b : T\). Por hipótese de indução em ambos: \(\Gamma
+    \vdash t_a[x \mapsto v] : T \to T_2\) e \(\Gamma
+    \vdash t\_b{[}x \mapsto v{]} : T\). Por (T-App):
+    \(\Gamma \vdash (t\_a, t\_b){[}x \mapsto v{]} :
+    T\_2\).
+  \item
+    \emph{\(t = \mathbf{true}\), \(t = \mathbf{false}\),
+    \(t = \mathbf{if}\ldots\):} Análogos,
+    usando (T-True), (T-False) e (T-If).
+\end{itemize}
+
+\textbf{Teorema (Preservação).} Se \(\Gamma \vdash t : T\) e \(t \to
+t'\), então \(\Gamma \vdash t' : T\).
+
+\emph{Demonstração.} Por indução sobre a derivação de \(t \to t'\).
+
+\textbf{Caso (E-Beta):} \(t = (\lambda x \{:\}
+  T\_1.\, t\_1)\, v\_2 \to t\_1{[}x \mapsto
+v\_2{]} = t'\).
+
+A derivação de \(\Gamma \vdash t : T_2\) termina com (T-App), portanto:
+
+\begin{itemize}
+  \item
+    \(\Gamma \vdash \lambda x {:} T_1.\, t_1 : T_1 \to T_2\),
+    derivada por (T-Abs), donde \(\Gamma, x : T_1 \vdash t_1 : T_2\).
+  \item
+    \(\Gamma \vdash v_2 : T_1\).
+\end{itemize}
+
+Pelo Lema da Substituição: \(\Gamma \vdash t_1[x \mapsto v_2] : T_2\).
+
+\textbf{Caso (E-App1):} \(t = t_1\, t_2 \to t_1'\, t_2 = t'\), com
+\(t\_1 \to t\_1'\).
+
+A derivação de \(\Gamma \vdash t : T_2\) termina com (T-App):
+
+\begin{itemize}
+  \item
+    \(\Gamma \vdash t_1 : T_1 \to T_2\)
+  \item
+    \(\Gamma \vdash t_2 : T_1\)
+\end{itemize}
+
+Por hipótese de indução: \(\Gamma \vdash t_1' : T_1 \to T_2\). Por
+(T-App): \(\Gamma \vdash t_1'\, t_2 : T_2\).
+
+\textbf{Caso (E-App2):} \(t = v_1\, t_2 \to v_1\, t_2' = t'\), com
+\(t\_2 \to t\_2'\).
+
+Analogamente, (T-App) fornece \(\Gamma \vdash v_1 : T_1 \to T_2\) e
+\(\Gamma \vdash t\_2 : T\_1\). Por hipótese
+de indução: \(\Gamma \vdash t_2' : T_1\). Por (T-App): \(\Gamma
+\vdash v_1\, t_2' : T_2\).
+
+\textbf{Caso (E-IfTrue):} \(t =
+  \mathbf{if}~\mathbf{true}~\mathbf{then}~t\_2\\
+\mathbf{else}~t\_3 \to t\_2 = t'\).
+
+A derivação termina com (T-If), donde \(\Gamma \vdash t_2 : T\).
+Portanto \(\Gamma \vdash t' : T\).
+
+\textbf{Caso (E-IfFalse):} \(t =
+  \mathbf{if}~\mathbf{false}~\mathbf{then}~t\_2\\
+\mathbf{else}~t\_3 \to t\_3 = t'\).
+
+Análogo: (T-If) fornece \(\Gamma \vdash t_3 : T\).
+
+\textbf{Caso (E-If):} \(t =
+  \mathbf{if}~t\_1~\mathbf{then}~t\_2~\mathbf{else}~t\_3 \to
+  \mathbf{if}~t\_1'~\mathbf{then}~t\_2~\mathbf{else}~t\_3 =
+t'\), com \(t_1 \to t_1'\).
+
+A derivação termina com (T-If):
+
+\begin{itemize}
+  \item
+    \(\Gamma \vdash t_1 : \mathbf{Bool}\)
+  \item
+    \(\Gamma \vdash t_2 : T\)
+  \item
+    \(\Gamma \vdash t_3 : T\)
+\end{itemize}
+
+Por hipótese de indução: \(\Gamma \vdash t_1' : \mathbf{Bool}\). Por
+(T-If): \(\Gamma \vdash
+\mathbf{if}~t\_1'~\mathbf{then}~t\_2~\mathbf{else}~t\_3 : T\).
+
+Os dois teoremas juntos estabelecem a \textbf{correção do tipo} do
+STLC+Bool: toda sequência de reduções a partir de um termo fechado e
+bem tipado produz, a cada passo, termos bem tipados do mesmo tipo, e
+jamais produz um termo preso.
+
+\section{Closure Conversion}
+
+\subsection{Motivação}
+
+O $\lambda$-cálculo trata funções como valores de primeira classe: uma
+abstração pode ser passada como argumento, retornada como resultado e
+armazenada em estruturas de dados. Em uma linguagem de baixo nível
+como C ou em uma representação intermediária como a IRT, toda função
+é um procedimento com endereço estático; não há, nativamente, o
+conceito de um valor funcional que carrega variáveis livres.
+
+A \textbf{closure conversion} (conversão de closures) é a
+transformação que torna esse gap explícito e o resolve. Ela separa
+cada abstração em dois componentes:
+
+\begin{itemize}
+  \item Um \textbf{código promovido} (lifted): uma função de nível superior,
+    completamente fechada (sem variáveis livres), que recebe o ambiente
+    capturado como parâmetro explícito.
+  \item Um \textbf{registro de closure}: uma estrutura de dados criada no
+    ponto em que a abstração aparece no programa-fonte, contendo uma
+    referência ao código promovido e os valores das variáveis
+    capturadas.
+\end{itemize}
+
+\noindent
+O resultado da closure conversion é um programa onde toda função é
+fechada e toda aplicação passa o ambiente capturado explicitamente.
+Nesta seção formalizamos essa transformação para o $\lambda$-cálculo não
+tipado, usando a linguagem TImp como alvo.
+
+\subsection{Variáveis Livres}
+
+A análise de variáveis livres é a pré-condição da closure conversion.
+Definimos \(\mathrm{FV}(t)\), o conjunto de variáveis livres de um
+termo \(t\), por indução estrutural:
+
+\[
+  \begin{array}{rcl}
+    \mathrm{FV}(x)        & = & \{x\} \\
+    \mathrm{FV}(\lambda x.\, t) & = & \mathrm{FV}(t) \setminus \{x\} \\
+    \mathrm{FV}(t_1\, t_2) & = & \mathrm{FV}(t_1) \cup \mathrm{FV}(t_2)
+  \end{array}
+\]
+
+Um termo \(t\) é \textbf{fechado} quando \(\mathrm{FV}(t) = \emptyset\).
+Assumimos que o termo de entrada da closure conversion é fechado;
+variáveis livres restantes correspondem a erros do programador.
+
+\subsection{Anotação de Lambdas}
+
+O primeiro passo é percorrer o termo e atribuir a cada abstração um
+\textbf{identificador único} \(k \in \mathbb{N}\) e registrar a lista
+das variáveis que ela captura. Definimos os termos anotados
+\(\hat{t}\) por:
+
+\[
+  \hat{t} \;::=\; \hat{x}
+  \;\mid\; \hat{t}\; \hat{t}
+  \;\mid\; \lambda^k\, x\,[\overline{y}]\,.\;\hat{t}
+\]
+
+onde \(\overline{y} = [y_1, \ldots, y_j]\) é a lista (em alguma ordem
+fixa) das variáveis livres da subclosure, isto é,
+\(\overline{y} = \mathrm{FV}(\hat{t}) \setminus \{x\}\).
+
+O conjunto de variáveis livres de um termo anotado é definido por:
+
+\[
+  \begin{array}{rcl}
+    \mathrm{FV}(\hat{x}) & = & \{x\} \\
+    \mathrm{FV}(\hat{t}_1\; \hat{t}_2) & = & \mathrm{FV}(\hat{t}_1)
+    \cup \mathrm{FV}(\hat{t}_2) \\
+    \mathrm{FV}(\lambda^k\, x\,[\overline{y}]\,.\;\hat{t}) & = &
+    \{\overline{y}\}
+  \end{array}
+\]
+
+A função de anotação \(\mathit{ann}\) percorre o termo em
+pós-ordem (abstrações internas recebem IDs menores):
+
+\[
+  \begin{array}{rcl}
+    \mathit{ann}(x) & = & \hat{x} \\[4pt]
+    \mathit{ann}(t_1\, t_2) & = & \mathit{ann}(t_1)\;\mathit{ann}(t_2) \\[4pt]
+    \mathit{ann}(\lambda x.\, t) & = &
+    \lambda^k\, x\,[\overline{y}]\,.\;\hat{t}
+    \quad \text{onde } \hat{t} = \mathit{ann}(t),\;
+    k \text{ novo},\;
+    \overline{y} = \mathrm{FV}(\hat{t}) \setminus \{x\}
+  \end{array}
+\]
+
+\subsection{O Tipo Closure}
+
+A closure conversion utiliza um \textbf{registro uniforme} para
+representar toda função como valor em tempo de execução. Seja
+\(N = \max\{|\overline{y}| : \lambda^k\, x\,[\overline{y}]\,.\;\hat{t}
+\text{ ocorre em } \mathit{ann}(t)\}\) o número máximo de variáveis
+capturadas por qualquer abstração do programa. O tipo alvo é:
+
+\[
+  \mathbf{record}\;\mathtt{Closure}\;\{
+    \;\mathtt{tag} : \mathbf{int};\;
+    \mathtt{f}_0 : \mathtt{Closure};\;
+    \ldots;\;
+  \mathtt{f}_{N-1} : \mathtt{Closure}\;\}
+\]
+
+O campo \(\mathtt{tag}\) identifica qual lambda a closure representa
+(o identificador \(k\)), e os campos \(\mathtt{f}_i\) guardam os
+valores das variáveis capturadas. Os campos não utilizados por uma
+closure particular simplesmente não são inicializados.
+
+\subsection{A Tradução}
+
+A tradução \(\llbracket \hat{t}\rrbracket_\sigma\) converte um termo
+anotado em uma expressão TImp, dado um \textbf{ambiente de
+substituição} \(\sigma : \mathit{Var} \rightharpoonup
+\mathit{ExpTImp}\) que mapeia variáveis-fonte para expressões-alvo.
+
+\[
+  \llbracket \hat{x} \rrbracket_\sigma \;=\;
+  \begin{cases}
+    \sigma(x) & \text{se } x \in \mathrm{dom}(\sigma) \\
+    x         & \text{caso contrário}
+  \end{cases}
+\]
+
+\[
+  \llbracket \hat{t}_1\; \hat{t}_2 \rrbracket_\sigma \;=\;
+  \mathtt{apply}\bigl(\llbracket \hat{t}_1 \rrbracket_\sigma,\;
+  \llbracket \hat{t}_2 \rrbracket_\sigma\bigr)
+\]
+
+\[
+  \llbracket \lambda^k\, x\,[y_1,\ldots,y_j]\,.\;\hat{t}
+  \rrbracket_\sigma \;=\;
+  \mathbf{new}\;\mathtt{Closure}\;\bigl\{
+    \mathtt{tag} = k,\;
+    \mathtt{f}_0 = \sigma(y_1),\;
+    \ldots,\;
+    \mathtt{f}_{j-1} = \sigma(y_j)
+  \bigr\}
+\]
+
+A regra para uma abstração \emph{não} compila o corpo neste ponto: ela
+apenas cria o registro de closure com a identificação do código
+promovido (\(\mathtt{tag}\)) e os valores capturados. O corpo é
+compilado separadamente, na geração das funções promovidas.
+
+\subsection{Funções Promovidas}
+
+Para cada lambda anotado \((k, x, [y_1,\ldots,y_j], \hat{t})\) coletado
+do termo, gera-se a função TImp:
+
+\[
+  \mathbf{fn}\;\mathtt{lam}\_k\;
+  (\mathtt{\_env} : \mathtt{Closure},\;
+  \mathtt{\_arg} : \mathtt{Closure}) :
+  \mathtt{Closure}\;\{
+    \;\mathbf{return}\;
+  \llbracket \hat{t} \rrbracket_{\sigma_k}\;\}
+\]
+
+onde o ambiente de substituição \(\sigma_k\) é:
+
+\[
+  \sigma_k \;=\;
+  \bigl[y_1 \mapsto \mathtt{\_env.f}_0,\;\ldots,\;
+    y_j \mapsto \mathtt{\_env.f}_{j-1},\;
+  x \mapsto \mathtt{\_arg}\bigr]
+\]
+
+A substituição em \(\sigma_k\) mapeia cada variável capturada ao
+campo correspondente de \texttt{\_env} e o parâmetro formal \(x\) ao
+argumento recebido. Toda chamada recursiva a \(\llbracket \cdot
+\rrbracket\) dentro do corpo usa \(\sigma_k\), de modo que o corpo
+inteiro é compilado como uma única expressão TImp.
+
+\subsection{Despacho Dinâmico}
+
+Como o campo \texttt{tag} de uma closure determina qual função promovida
+chamar, é necessária uma função de \textbf{despacho} que, dado um par
+(closure, argumento), redirecione para a função promovida correta. Com
+\(n\) lambdas de tags \(k_1 < k_2 < \cdots < k_n\):
+
+\[
+  \mathbf{fn}\;\mathtt{apply}\;
+  (\mathtt{\_f} : \mathtt{Closure},\;
+  \mathtt{\_arg} : \mathtt{Closure}) :
+  \mathtt{Closure}\;\{
+  \]
+  \[
+    \quad \mathbf{if}\;\mathtt{\_f.tag} = k_1\;
+    \mathbf{then}\;\{\mathbf{return}\;\mathtt{lam}_{k_1}(\mathtt{\_f},
+    \mathtt{\_arg})\;\}
+  \]
+  \[
+    \quad \mathbf{else}\;\{\;\mathbf{if}\;\mathtt{\_f.tag} =
+      k_2\;\mathbf{then}\;
+      \{\mathbf{return}\;\mathtt{lam}_{k_2}(\mathtt{\_f}, \mathtt{\_arg})\;\}
+    \]
+    \[
+      \quad \ldots
+    \]
+    \[
+      \quad\mathbf{else}\;\{\mathbf{return}\;
+  \mathbf{new}\;\mathtt{Closure}\;\{\mathtt{tag} = {-1}\}\;\}\;\}\;\}
+\]
+
+O bloco \(\mathbf{else}\) final é inalcançável para programas bem
+formados, pois todo valor-closure criado pela tradução tem um tag
+válido.
+
+\subsection{Correção da Tradução}
+
+A closure conversion preserva a semântica do lambda cálculo: para
+qualquer termo fechado \(t\) tal que \(t \Downarrow v\) na semântica
+big-step call-by-value, a execução do programa TImp gerado termina
+imprimindo a closure correspondente ao valor \(v\). Mais precisamente,
+o valor \(v = \lambda x.\, t'\) é representado em tempo de execução
+pela closure \(\mathbf{new}\;\mathtt{Closure}\;\{\mathtt{tag} =
+k,\;\ldots\}\) onde \(k\) é o identificador atribuído à abstração
+\(\lambda x.\, t'\) e os campos \(\mathtt{f}_i\) carregam as
+representações dos valores de suas variáveis livres.
+
+A invariante central é: \textbf{toda closure em tempo de execução
+representa exatamente um valor do $\lambda$-cálculo}. Os campos
+\(\mathtt{f}_i\) são sempre closures válidas (nunca campos não
+inicializados são lidos), porque a tradução \(\llbracket \lambda^k\,
+x\,[y_1,\ldots,y_j]\,.\;\hat{t}\rrbracket_\sigma\) escreve
+exatamente os \(j\) campos usados por \(\mathtt{lam}_k\).
+
+\subsection{Exemplo Trabalhado}
+
+Consideremos o combinador K aplicado ao combinador identidade:
+
+\[
+  (\lambda f.\,\lambda x.\, f)\;(\lambda y.\, y)
+\]
+
+\paragraph{Passo 1: Anotação.}
+
+Percorrendo em pós-ordem:
+\begin{itemize}
+  \item \(\lambda y.\, y\) tem \(\mathrm{FV} = \emptyset\); recebe tag \(0\).
+  \item \(\lambda x.\, f\) tem \(\mathrm{FV}(\hat{t}) \setminus \{x\}
+    = \{f\}\); recebe tag \(1\).
+  \item \(\lambda f.\,\ldots\) tem \(\mathrm{FV} = \emptyset\);
+    recebe tag \(2\).
+\end{itemize}
+
+O termo anotado é:
+\[
+  \bigl(\lambda^2 f\,[]\,.\;\lambda^1 x\,[f]\,.\;\hat{f}\bigr)\;
+  \bigl(\lambda^0 y\,[]\,.\;\hat{y}\bigr)
+\]
+
+\paragraph{Passo 2: Tipo Closure.}
+
+O máximo de variáveis capturadas é 1 (em \(\lambda^1\)). Logo:
+\[
+  \mathbf{record}\;\mathtt{Closure}\;\{\;\mathtt{tag}:
+  \mathbf{int};\;\mathtt{f}_0: \mathtt{Closure}\;\}
+\]
+
+\paragraph{Passo 3: Funções promovidas.}
+
+Para \(\lambda^0 y\,[]\,.\;\hat{y}\) com \(\sigma_0 = [y \mapsto
+\mathtt{\_arg}]\):
+\begin{verbatim}
+fn lam_0(_env: Closure, _arg: Closure) : Closure {
+  return _arg;
+}
+\end{verbatim}
+
+Para \(\lambda^1 x\,[f]\,.\;\hat{f}\) com \(\sigma_1 = [f \mapsto
+\mathtt{\_env.f}_0,\, x \mapsto \mathtt{\_arg}]\):
+\begin{verbatim}
+fn lam_1(_env: Closure, _arg: Closure) : Closure {
+  return _env.f0;   /* [f -> _env.f0]_sigma1(hat{f}) */
+}
+\end{verbatim}
+
+Para \(\lambda^2 f\,[]\,.\;\lambda^1 x\,[f]\,.\;\hat{f}\) com
+\(\sigma_2 = [f \mapsto \mathtt{\_arg}]\):
+\[
+  \llbracket \lambda^1 x\,[f]\,.\;\hat{f} \rrbracket_{\sigma_2}
+  = \mathbf{new}\;\mathtt{Closure}\;\{\mathtt{tag}=1,\;
+  \mathtt{f}_0 = \sigma_2(f)\}
+  = \mathbf{new}\;\mathtt{Closure}\;\{\mathtt{tag}=1,\;
+  \mathtt{f}_0 = \mathtt{\_arg}\}
+\]
+\begin{verbatim}
+fn lam_2(_env: Closure, _arg: Closure) : Closure {
+  return new Closure { tag = 1, f0 = _arg };
+}
+\end{verbatim}
+
+\paragraph{Passo 4: Bloco principal.}
+
+\[
+  \llbracket (\lambda^2 f\,[]\,.\;\ldots)\;(\lambda^0
+  y\,[]\,.\;\hat{y}) \rrbracket_\emptyset
+  = \mathtt{apply}\bigl(
+    \mathbf{new}\;\mathtt{Closure}\{\mathtt{tag}=2\},\;
+    \mathbf{new}\;\mathtt{Closure}\{\mathtt{tag}=0\}
+  \bigr)
+\]
+
+\begin{verbatim}
+var _res : Closure = apply(new Closure {tag=2}, new Closure {tag=0});
+print _res;
+\end{verbatim}
+
+\paragraph{Execução.}
+
+\begin{align*}
+  &\mathtt{apply}(\{\mathtt{tag}=2\},\;\{\mathtt{tag}=0\})
+  \\
+  \to\;&\mathtt{lam\_2}(\{\mathtt{tag}=2\},\;\{\mathtt{tag}=0\})
+  \\
+  =\;&\mathbf{new}\;\mathtt{Closure}\;\{\mathtt{tag}=1,\;
+  \mathtt{f}_0=\{\mathtt{tag}=0\}\}
+\end{align*}
+
+O resultado é a closure para \(\lambda x.\, f\) com \(f\) capturado
+como \(\lambda y.\, y\). O bloco principal imprime:
+\begin{verbatim}
+Closure { tag = 1; f0 = Closure { tag = 0; }; }
+\end{verbatim}
+
+\section{Implementação em Haskell}
+
+Apresentamos a implementação do interpretador para o \textbf{cálculo
+lambda não tipado} em Haskell. A implementação segue a semântica
+big-step call-by-value com um modelo de avaliação baseado em
+\textbf{ambientes}, que substitui a operação de substituição textual
+por uma associação de nomes a valores em tempo de execução.
+
+\subsection{Representação de Termos}
+
+A árvore de sintaxe abstrata reflete diretamente a gramática:
+
+\begin{minted}{haskell}
+type Name = String
+
+data Term
+  = Var Name
+  | Lam Name Term
+  | App Term Term
+\end{minted}
+
+\subsection{Valores e Ambientes}
+
+Como valores são apenas abstrações, representamo-los como
+\textbf{closures}, pares compostos pela abstração e pelo ambiente
+léxico em que ela foi criada. O ambiente captura os valores das
+variáveis livres da abstração no momento em que ela foi criada,
+realizando o escopo léxico.
+
+\begin{minted}{haskell}
+data Value = VClosure Name Term Env
+
+type Env = Map Name Value
+\end{minted}
+
+\subsection{O Interpretador}
+
+A função \haskell{eval} implementa as regras (B-Lam)
+e (B-App) diretamente. Para detectar potenciais não-terminações, um
+contador de passos é mantido na mônada \haskell{State Int}:
+
+\begin{minted}{haskell}
+eval :: Env -> Term -> EvalM Value
+eval env (Lam x body) =
+  return (VClosure x body env)
+eval env (Var x) =
+  case Map.lookup x env of
+    Just v  -> return v
+    Nothing -> throwError $ "Unbound variable: " ++ x
+eval env (App t1 t2) = do
+    tick
+    v1 <- eval env t1
+    v2 <- eval env t2
+    case v1 of
+      VClosure x body closEnv ->
+        eval (Map.insert x v2 closEnv) body
+\end{minted}
+
+A função \haskell{tick} incrementa o contador de
+passos e interrompe a avaliação se o limite configurado (100 000
+passos) for atingido, evitando que o REPL bloqueie indefinidamente em
+termos como \((\lambda x.\, x\, x)\,(\lambda x.\, x\, x)\).
+
+\subsection{A Interface REPL}
+
+O executável \verb|lambda| oferece um REPL
+interativo que lê um termo, avalia e imprime o resultado. A interface
+aceita tanto \verb|\\| quanto
+\verb|λ| como símbolo de abstração, e múltiplos
+parâmetros em uma mesma abstração são abreviados:
+
+\begin{verbatim}
+Untyped Lambda Calculus
+  syntax:  \x. t   |   t t   |   x
+  multi-binder:  \x y z. t
+  quit:    :q
+
+λ> \x. x
+--> λx. x
+
+λ> (\x. x) (\y. y)
+--> λy. y
+
+λ> \x y. x
+--> λx y. x
+
+λ> (\x y. x) (\a. a) (\b. b)
+--> λa. a
+
+λ> (\x. x x) (\x. x x)
+Error: Step limit exceeded after 100000 steps (possible non-terminating term)
+\end{verbatim}
+
+O modelo baseado em ambientes dispensa a operação de substituição
+textual (com a correspondente necessidade de \(\alpha\)-conversão),
+ao custo de que o resultado exibido mostra o corpo sintático da
+closure, sem expandir as variáveis capturadas no ambiente. Para os
+propósitos pedagógicos do REPL, esta representação é suficiente.
+
+\subsection{Compilação para TImp via Closure Conversion}
+
+A formalização da seção anterior se traduz diretamente em Haskell no
+módulo \verb|Lambda.Backend.TImp.LambdaToTImp|. Apresentamos os
+pontos de correspondência mais relevantes entre a teoria e o código.
+
+\paragraph{Termos anotados.}
+
+O tipo \haskell{Ann} representa os termos anotados \(\hat{t}\):
+
+\begin{minted}{haskell}
+type LamId = Int
+
+data Ann
+  = AVar Name
+  | ALam LamId Name [Name] Ann  -- k, x, [y1,...,yj], corpo
+  | AApp Ann Ann
+\end{minted}
+
+O construtor \haskell{ALam k x fvs body} corresponde a
+\(\lambda^k\, x\,[\overline{y}]\,.\;\hat{t}\): \haskell{k} é o
+identificador único, \haskell{fvs} é a lista \(\overline{y}\) de
+variáveis capturadas e \haskell{body} é o corpo já anotado.
+
+\paragraph{Variáveis livres de termos anotados.}
+
+A função \haskell{freeVarsAnn} implementa a definição formal de
+\(\mathrm{FV}\) sobre termos anotados:
+
+\begin{minted}{haskell}
+freeVarsAnn :: Ann -> Set Name
+freeVarsAnn (AVar x)         = Set.singleton x
+freeVarsAnn (AApp f a)       = freeVarsAnn f `Set.union` freeVarsAnn a
+freeVarsAnn (ALam _ _ fvs _) = Set.fromList fvs
+\end{minted}
+
+Para um \haskell{ALam}, as variáveis livres são exatamente as já
+armazenadas em \haskell{fvs}, sem necessidade de percorrer o corpo
+novamente.
+
+\paragraph{Passagem de anotação.}
+
+A função \haskell{annotate} implementa \(\mathit{ann}\). O estado
+monádico fornece novos identificadores; o percurso é em pós-ordem,
+de modo que lambdas internas recebem IDs menores:
+
+\begin{minted}{haskell}
+type AnnM = State Int
+
+annotate :: Term -> AnnM Ann
+annotate (Var x)   = return (AVar x)
+annotate (App f a) = AApp <$> annotate f <*> annotate a
+annotate (Lam x t) = do
+  body <- annotate t
+  k    <- freshId
+  let fvs = Set.toList (Set.delete x (freeVarsAnn body))
+  return (ALam k x fvs body)
+\end{minted}
+
+\paragraph{A tradução \(\llbracket \cdot \rrbracket_\sigma\).}
+
+A função \haskell{compileExprS} implementa \(\llbracket \cdot
+\rrbracket_\sigma\), recebendo o ambiente de substituição \(\sigma\)
+como uma lista de pares \haskell{(Name, Exp)}:
+
+\begin{minted}{haskell}
+type Subst = [(Name, Exp)]
+
+compileExprS :: Subst -> Ann -> Exp
+compileExprS s (AVar x) =
+  case lookup x s of { Just e -> e; Nothing -> EVar x }
+compileExprS s (AApp f a) =
+  ECall "apply" [compileExprS s f, compileExprS s a]
+compileExprS s (ALam k _ fvs _) =
+  ENew "Closure" $
+    ("tag", EInt k) :
+    [("f" ++ show i, compileExprS s (AVar v)) | (i,v) <- zip [0..] fvs]
+\end{minted}
+
+A equação para \haskell{ALam} implementa precisamente a regra:
+\[
+  \llbracket \lambda^k\, x\,[y_1,\ldots,y_j]\,.\;\hat{t}
+  \rrbracket_\sigma
+  = \mathbf{new}\;\mathtt{Closure}\;\{\mathtt{tag}=k,\;
+  \mathtt{f}_0=\sigma(y_1),\;\ldots,\;\mathtt{f}_{j-1}=\sigma(y_j)\}
+\]
+O corpo \haskell{body} \emph{não} é compilado aqui: ele é compilado
+separadamente, em \haskell{genLiftedFunc}.
+
+\paragraph{Funções promovidas.}
+
+A função \haskell{genLiftedFunc} gera cada \(\mathtt{lam}_k\). O
+ambiente de substituição \(\sigma_k\) é construído explicitamente
+como uma lista de pares antes de chamar \haskell{compileExprS}:
+
+\begin{minted}{haskell}
+genLiftedFunc :: (LamId, Name, [Name], Ann) -> FuncDecl
+genLiftedFunc (k, x, fvs, body) =
+  FuncDecl ("lam_" ++ show k)
+    [Param "_env" (TRecord "Closure"), Param "_arg" (TRecord "Closure")]
+    (RTTy (TRecord "Closure"))
+    [SReturn (Just (compileExprS subst body))]
+  where
+    subst = [( v, EField (EVar "_env") ("f" ++ show i))
+             | (i, v) <- zip [0..] fvs]
+            ++ [(x, EVar "_arg")]
+\end{minted}
+
+O ambiente \haskell{subst} é exatamente \(\sigma_k = [y_i \mapsto
+\mathtt{\_env.f}_{i-1}] \cup [x \mapsto \mathtt{\_arg}]\). O corpo
+inteiro compila para uma única expressão TImp via
+\haskell{compileExprS subst body}.
+
+\paragraph{Despacho dinâmico.}
+
+A função \haskell{genApplyFunc} constrói a cadeia de condicionais
+aninhados. A lista \haskell{lids} contém os IDs de todos os lambdas:
+
+\begin{minted}{haskell}
+genApplyFunc :: [LamId] -> FuncDecl
+genApplyFunc lids =
+  FuncDecl "apply"
+    [Param "_f" (TRecord "Closure"), Param "_arg" (TRecord "Closure")]
+    (RTTy (TRecord "Closure"))
+    [buildDispatch lids]
+  where
+    buildDispatch [] =
+      SReturn (Just (ENew "Closure" [("tag", EInt (-1))]))
+    buildDispatch (k:ks) =
+      SIf (EField (EVar "_f") "tag" :=: EInt k)
+          [SReturn (Just (ECall ("lam_" ++ show k) [EVar "_f", EVar "_arg"]))]
+          [buildDispatch ks]
+\end{minted}
+
+\paragraph{Ponto de entrada.}
+
+A função \haskell{lambdaToTImp} reúne todas as fases e produz um
+programa TImp completo:
+
+\begin{minted}{haskell}
+lambdaToTImp :: Term -> TImp
+lambdaToTImp term = TImp decls mainBlock
+  where
+    ann     = evalState (annotate term) 0
+    lambdas = collectLambdas ann
+    maxFVs  = maximum (0 : [length fvs | (_,_,fvs,_) <- lambdas])
+    lids    = [k | (k,_,_,_) <- lambdas]
+    decls   = DRecord (genClosureRecord maxFVs)
+              : map (DFunc . genLiftedFunc) lambdas
+              ++ [DFunc (genApplyFunc lids)]
+    mainBlock =
+      [ SDecl "_res" (TRecord "Closure") (compileExprS [] ann)
+      , SPrint (EVar "_res") ]
+\end{minted}
+
+\paragraph{Verificação de tipos e inicialização parcial.}
+
+O tipo \haskell{Closure} tem \(N\) campos \(\mathtt{f}_i\), mas uma
+closure que captura \(j < N\) variáveis inicializa apenas
+\(\mathtt{f}_0, \ldots, \mathtt{f}_{j-1}\). O verificador de tipos
+de TImp foi ligeiramente relaxado para aceitar inicialização parcial
+de registros: a regra (New) verifica que todos os campos
+\emph{fornecidos} têm o tipo correto e que nenhum campo
+\emph{extra} foi fornecido, mas não exige que todos os campos
+declarados sejam inicializados. Em tempo de execução, os campos não
+inicializados nunca são acessados para closures válidas, pois
+\(\mathtt{lam}_k\) acessa apenas \(\mathtt{\_env.f}_0, \ldots,
+\mathtt{\_env.f}_{j-1}\) e \(j\) é o número de campos que a closure
+com tag \(k\) efetivamente inicializou.
+
+\section{Conclusão}
+
+O $\lambda$-cálculo é o núcleo de toda linguagem funcional moderna. As
+suas semânticas big-step e small-step call-by-value definem de forma
+precisa o que significa avaliar uma função: primeiro o operador,
+depois o argumento, e só então a substituição.
+
+A extensão com booleanos e tipos simples produziu o STLC+Bool, para o
+qual demonstramos os dois teoremas centrais da teoria de tipos:
+progresso e preservação. O progresso garante que programas bem
+tipados nunca ficam presos; a preservação garante que a tipagem é
+invariante pela redução. As demonstrações revelaram a estrutura dos
+argumentos que continuarão válidos para extensões mais ricas da
+linguagem: o Lema das Formas Canônicas é usado no progresso para
+identificar a forma dos valores, e o Lema da Substituição é o passo
+técnico essencial da preservação.
+
+A implementação em Haskell do interpretador baseado em ambientes
+evidencia a correspondência entre a semântica formal e o código: a
+regra (B-Lam) vira a construção de uma closure; a regra (B-App) vira
+a sequência de chamadas recursivas com extensão do ambiente. Essa
+correspondência é a base metodológica sobre a qual os próximos
+capítulos construirão interpretadores para linguagens
+progressivamente mais ricas.

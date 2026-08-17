@@ -1,0 +1,657 @@
+\chapter{Seleção de Instruções}\label{chap:x86-codegen}
+
+\section{Introdução}
+
+Com a IRT canonicalizada e o \texttt{Coloring} em mãos, a fase final do
+back-end é a \textbf{seleção de instruções}: traduzir cada nó da IRT para
+uma sequência concreta de instruções X86-64. Diferentemente das fases
+anteriores, que manipulam abstrações (temporários, grafos, conjuntos),
+a seleção de instruções lida com \emph{registradores físicos, offsets de
+memória e o protocolo de chamada de função}.
+
+Dois desafios técnicos merecem atenção especial nesta fase:
+
+\begin{enumerate}
+  \item \textbf{Avaliação de \texttt{BINOP}}: compilar $e_1 \oplus e_2$
+    requer guardar o resultado de $e_1$ enquanto $e_2$ é avaliado. Se
+    $e_2$ contém uma chamada de função, todos os registradores caller-saved
+    são clobberados. A solução é empilhar $e_1$ na pilha e contabilizar
+    esse deslocamento extra para manter o alinhamento de 16 bytes nas
+    chamadas aninhadas.
+  \item \textbf{Alinhamento de pilha}: cada \texttt{callq} exige
+    \texttt{\%rsp} múltiplo de 16. O gerador deve rastrear dinamicamente
+    quantos bytes extras foram empilhados (além do prólogo) para inserir
+    padding quando necessário.
+\end{enumerate}
+
+\section{Notação Formal}
+
+Usamos dois julgamentos para especificar a tradução:
+
+\begin{itemize}
+  \item $\Phi \vdash e \Rightarrow \vec{I}$: sob o colorindo $\Phi$
+    (que mapeia cada temporário a um registrador físico ou offset de memória),
+    a expressão $e$ é compilada para a sequência de instruções $\vec{I}$.
+    O resultado fica sempre em \texttt{\%rax} (\textit{scratchAcc}).
+
+  \item $\Phi \vdash s \Rightarrow \vec{I}$: o enunciado $s$ é compilado
+    para $\vec{I}$ sem valor de retorno explícito.
+\end{itemize}
+
+Denotamos:
+$r_{\mathit{acc}} = \texttt{\%rax}$,
+$r_{\mathit{bin}} = \texttt{\%r11}$,
+$r_{\mathit{mem}} = \texttt{\%r10}$.
+
+\section{Regras de Compilação de Expressões}
+
+\subsection{Constante e Temporário}
+
+\[
+  \infer[\text{CE-Const}]
+  {\Phi \vdash \texttt{CONST}(n) \Rightarrow [\texttt{movq } \$n,\,
+  \%\mathit{rax}]}{}
+\]
+
+\[
+  \infer[\text{CE-Temp-Reg}]
+  {\Phi \vdash \texttt{TEMP}(t) \Rightarrow [\texttt{movq } r,\,
+  \%\mathit{rax}]}
+  {\Phi(t) = r \quad r \neq r_{\mathit{acc}}}
+  \qquad
+  \infer[\text{CE-Temp-Acc}]
+  {\Phi \vdash \texttt{TEMP}(t) \Rightarrow []}
+  {\Phi(t) = r_{\mathit{acc}}}
+\]
+
+\[
+  \infer[\text{CE-Temp-Mem}]
+  {\Phi \vdash \texttt{TEMP}(t) \Rightarrow [\texttt{movq }
+  \mathit{off}(\%\mathit{rbp}),\, \%\mathit{rax}]}
+  {\Phi(t) = \mathit{off}}
+\]
+
+\subsection{Operação Binária}
+
+\[
+  \infer[\text{CE-Binop}]
+  {\Phi \vdash \texttt{BINOP}(\oplus, e_1, e_2) \Rightarrow
+    \vec{I_1};\; \texttt{pushq \%rax};\; \vec{I_2};\;
+  \texttt{popq \%r11};\; \llbracket\oplus\rrbracket}
+  {\Phi \vdash e_1 \Rightarrow \vec{I_1} \quad \Phi \vdash e_2
+  \Rightarrow \vec{I_2}}
+\]
+
+O \texttt{pushq \%rax} salva $e_1$ na pilha \emph{antes} de avaliar $e_2$.
+Isso protege o valor de $e_1$ mesmo que $e_2$ contenha chamadas que
+clobberem registradores caller-saved. O \texttt{popq \%r11} restaura $e_1$
+no registrador scratch de BINOP, deixando \texttt{\%rax = $e_2$} e
+\texttt{\%r11 = $e_1$}.
+
+A tradução $\llbracket\oplus\rrbracket$ de cada operador binário (com
+\texttt{\%r11 = $e_1$} e \texttt{\%rax = $e_2$}) é:
+
+\begin{center}
+  \begin{tabular}{ll}
+    \toprule
+    Operador & Instruções $\llbracket\oplus\rrbracket$ \\
+    \midrule
+    \texttt{BAdd} & \texttt{addq \%r11, \%rax} \\
+    \texttt{BMul} & \texttt{imulq \%r11, \%rax} \\
+    \texttt{BSub} & \texttt{negq \%rax; addq \%r11, \%rax} \\
+    \texttt{BDiv} & \texttt{movq \%rax, \%r10; movq \%r11, \%rax;
+    cqo; idivq \%r10} \\
+    \texttt{BMod} & (idem BDiv) \texttt{movq \%rdx, \%rax} \\
+    \texttt{BAnd} & \texttt{andq \%r11, \%rax} \\
+    \texttt{BOr}  & \texttt{orq \%r11, \%rax} \\
+    \texttt{BXor} & \texttt{xorq \%r11, \%rax} \\
+    \texttt{BEq}  & \texttt{cmpq \%rax, \%r11; sete \%al; movzbq \%al, \%rax} \\
+    \texttt{BNe}  & \texttt{cmpq \%rax, \%r11; setne \%al; movzbq
+    \%al, \%rax} \\
+    \texttt{BLt}  & \texttt{cmpq \%rax, \%r11; setl \%al; movzbq \%al, \%rax} \\
+    \texttt{BLe}  & \texttt{cmpq \%rax, \%r11; setle \%al; movzbq
+    \%al, \%rax} \\
+    \texttt{BGt}  & \texttt{cmpq \%rax, \%r11; setg \%al; movzbq \%al, \%rax} \\
+    \texttt{BGe}  & \texttt{cmpq \%rax, \%r11; setge \%al; movzbq
+    \%al, \%rax} \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+Para comparações, \texttt{cmpq src, dst} calcula $\mathit{dst} - \mathit{src}$
+e atualiza as flags. Portanto \texttt{cmpq \%rax, \%r11} calcula
+$\texttt{\%r11} - \texttt{\%rax} = e_1 - e_2$, que é exatamente o que
+as condições de comparação exigem.
+
+Para subtração, usamos a identidade $e_1 - e_2 = -(e_2) + e_1 = e_1 + (-e_2)$:
+\texttt{negq} nega $e_2$ em \texttt{\%rax} e depois \texttt{addq} soma $e_1$
+de \texttt{\%r11}.
+
+Para divisão e módulo, o X86-64 exige que o dividendo esteja em
+\texttt{rdx:rax} (estendido por \texttt{cqo}). Usamos \texttt{\%r10} como
+scratch para guardar o divisor antes de mover o dividendo para \texttt{\%rax}.
+
+\subsection{Memória e ESEQ}
+
+\[
+  \infer[\text{CE-Mem}]
+  {\Phi \vdash \texttt{MEM}(e) \Rightarrow \vec{I};\; [\texttt{movq }
+  0(\%\mathit{rax}),\, \%\mathit{rax}]}
+  {\Phi \vdash e \Rightarrow \vec{I}}
+\]
+
+\[
+  \infer[\text{CE-ESeq}]
+  {\Phi \vdash \texttt{ESEQ}(s, e) \Rightarrow \vec{I_s};\; \vec{I_e}}
+  {\Phi \vdash s \Rightarrow \vec{I_s} \quad \Phi \vdash e
+  \Rightarrow \vec{I_e}}
+\]
+
+A regra CE-ESeq é fornecida por completude. Na prática, a canonicalização
+elimina todos os nós \texttt{ESEQ} antes desta fase.
+
+\subsection{Chamada de Função}
+
+Seja $\vec{r} = [r_1, \ldots, r_n]$ os registradores de argumento da ABI
+(\texttt{\%rdi}, \texttt{\%rsi}, \texttt{\%rdx}, \texttt{\%rcx},
+\texttt{\%r8}, \texttt{\%r9}):
+
+\[
+  \infer[\text{CE-Call}]
+  {\Phi \vdash \texttt{CALL}(\texttt{NAME}(f), [a_1, \ldots, a_n])
+    \Rightarrow
+    \mathit{save};\;
+    \vec{I_1};\; [\texttt{movq \%rax,} r_1];\;
+    \cdots;\;
+    \vec{I_n};\; [\texttt{movq \%rax,} r_n];\;
+    [\texttt{xorq \%rax, \%rax};\; \texttt{callq } f];\;
+  \mathit{restore}}
+  {\Phi \vdash a_i \Rightarrow \vec{I_i}\; \forall i}
+\]
+
+Onde $\mathit{save}$ e $\mathit{restore}$ salvam e restauram os
+registradores caller-saved do pool de alocação que estão em uso (i.e.,
+  atribuídos a algum temporário pelo coloridor e portanto com valores que
+devem sobreviver ao \texttt{callq}). O \texttt{xorq \%rax, \%rax} zera
+\texttt{\%eax} como exigido pelo ABI para chamadas variádicas
+(\texttt{printf}, etc.).
+
+\section{Regras de Compilação de Enunciados}
+
+\subsection{MOVE}
+
+\[
+  \infer[\text{CS-Move-Reg}]
+  {\Phi \vdash \texttt{MOVE}(\texttt{TEMP}(t), e) \Rightarrow
+  \vec{I};\; [\texttt{movq \%rax,} r]}
+  {\Phi \vdash e \Rightarrow \vec{I} \quad \Phi(t) = r \quad r \neq
+  r_{\mathit{acc}}}
+\]
+
+\[
+  \infer[\text{CS-Move-Acc}]
+  {\Phi \vdash \texttt{MOVE}(\texttt{TEMP}(t), e) \Rightarrow \vec{I}}
+  {\Phi \vdash e \Rightarrow \vec{I} \quad \Phi(t) = r_{\mathit{acc}}}
+\]
+
+\[
+  \infer[\text{CS-Move-Spill}]
+  {\Phi \vdash \texttt{MOVE}(\texttt{TEMP}(t), e) \Rightarrow \vec{I};\;
+  [\texttt{movq \%rax,} \mathit{off}(\%\mathit{rbp})]}
+  {\Phi \vdash e \Rightarrow \vec{I} \quad \Phi(t) = \mathit{off}}
+\]
+
+\[
+  \infer[\text{CS-Move-Mem}]
+  {\Phi \vdash \texttt{MOVE}(\texttt{MEM}(\mathit{addr}),
+    \mathit{val}) \Rightarrow
+    \vec{I_a};\; [\texttt{movq \%rax, \%r10}];\; \vec{I_v};\;
+  [\texttt{movq \%rax,} 0(\%r10)]}
+  {\Phi \vdash \mathit{addr} \Rightarrow \vec{I_a} \quad \Phi \vdash
+  \mathit{val} \Rightarrow \vec{I_v}}
+\]
+
+Na regra CS-Move-Mem, \texttt{\%r10} (\textit{scratchMem}) guarda o
+endereço enquanto $\mathit{val}$ é avaliado em \texttt{\%rax}. Isso
+funciona porque \texttt{\%r10} não pertence ao pool de alocação e,
+portanto, nunca contém o valor de um temporário.
+
+\subsection{Rótulos, Saltos e Retorno}
+
+\[
+  \infer[\text{CS-Label}]
+  {\Phi \vdash \texttt{LABEL}(l) \Rightarrow [l\texttt{:}]}{}
+  \qquad
+  \infer[\text{CS-Jump}]
+  {\Phi \vdash \texttt{JUMP}(\texttt{NAME}(l)) \Rightarrow [\texttt{jmp } l]}{}
+\]
+
+\[
+  \infer[\text{CS-CJump}]
+  {\Phi \vdash \texttt{CJUMP}(e, l_t, l_f) \Rightarrow
+    \vec{I};\; [\texttt{testq \%rax, \%rax};\; \texttt{jne } l_t;\;
+  \texttt{jmp } l_f]}
+  {\Phi \vdash e \Rightarrow \vec{I}}
+\]
+
+\[
+  \infer[\text{CS-Return-Void}]
+  {\Phi \vdash \texttt{RETURN}([]) \Rightarrow \mathit{epilogue}(\Phi)}{}
+\]
+
+\[
+  \infer[\text{CS-Return-Val}]
+  {\Phi \vdash \texttt{RETURN}([e]) \Rightarrow \vec{I};\;
+  \mathit{epilogue}(\Phi)}
+  {\Phi \vdash e \Rightarrow \vec{I}}
+\]
+
+O epílogo $\mathit{epilogue}(\Phi)$ executa: restaura os registradores
+callee-saved em ordem inversa ao prólogo, restaura \texttt{\%rbp} e executa
+\texttt{retq}. O resultado de retorno fica em \texttt{\%rax}, que já contém
+o valor de $e$ após a regra CE acima.
+
+\section{Alinhamento de Pilha}
+
+\subsection{O Problema}
+
+A instrução \texttt{callq} exige \texttt{\%rsp} alinhado a 16 bytes.
+O prólogo garante o alinhamento \emph{estático} usando \texttt{frameAdj}.
+Mas durante a execução do corpo, \texttt{pushq \%rax} do BINOP
+(regra CE-Binop) empilha 8 bytes extras, quebrando o alinhamento para
+qualquer \texttt{callq} dentro de $e_2$.
+
+\subsection{Monada de Geração com Rastreamento de Profundidade}
+
+O gerador de código rastreia a profundidade extra acumulada pelos
+\texttt{pushq} de BINOP numa mônada de estado:
+
+\begin{minted}{haskell}
+data MState = MState [Instr] Int
+--                           ↑ extraDepth
+
+type X86M = State MState
+
+pushScratch :: Reg -> X86M ()
+pushScratch r = do
+  emit (Pushq (Reg r))
+  modify (\(MState is d) -> MState is (d + 8))
+
+popScratch :: Reg -> X86M ()
+popScratch r = do
+  emit (Popq (Reg r))
+  modify (\(MState is d) -> MState is (d - 8))
+
+getExtraDepth :: X86M Int
+getExtraDepth = gets (\(MState _ d) -> d)
+\end{minted}
+
+O campo \texttt{extraDepth} conta apenas os bytes de \texttt{pushScratch}
+(BINOPs), não os do prólogo (já contabilizados em \texttt{frameAdj}).
+
+\subsection{Cálculo de Padding}
+
+Antes de cada \texttt{callq}, o gerador:
+
+\begin{enumerate}
+  \item Empilha os registradores caller-saved em uso (\texttt{saved},
+    $n_{\mathit{saved}}$ registradores, $8 n_{\mathit{saved}}$ bytes).
+  \item Verifica se o deslocamento total $(\mathit{extra} + 8
+    n_{\mathit{saved}})$
+    é múltiplo de 16. Se não, empilha 8 bytes de padding.
+\end{enumerate}
+
+\begin{minted}{haskell}
+compileCall :: Env -> String -> [Expr] -> X86M ()
+compileCall env f args = do
+  extra <- getExtraDepth
+  let saved   = envCSRegs env
+      nSaved  = length saved
+      needPad = (extra + 8 * nSaved) `mod` 16 /= 0
+  mapM_ (emit . Pushq . Reg) saved
+  when needPad $ emit (Subq (Imm 8) (Reg RSP))
+  mapM_ (uncurry loadArg) (zip args argRegs)
+  emit (Xorq (Reg RAX) (Reg RAX))
+  emit (Callq f)
+  when needPad $ emit (Addq (Imm 8) (Reg RSP))
+  mapM_ (emit . Popq . Reg) (reverse saved)
+  where
+    loadArg e r = do
+      compileExpr env e
+      when (r /= scratchAcc) $ emit (Movq (Reg scratchAcc) (Reg r))
+\end{minted}
+
+\begin{remark}
+  O padding usa \texttt{subq \$8, \%rsp} em vez de \texttt{pushq} para
+  não empilhar lixo interpretável como dado. O ajuste contrário
+  \texttt{addq \$8, \%rsp} é feito antes de restaurar os caller-saved.
+\end{remark}
+
+\section{Implementação: Módulo \texttt{IRToX86}}
+
+\subsection{Ambiente de Compilação}
+
+\begin{minted}{haskell}
+data Env = Env
+  { envCol    :: Coloring   -- temporário → registrador ou slot
+  , envCSaved :: [Reg]      -- callee-saved usados (para o epílogo)
+  , envFAdj   :: Int        -- F do subq no prólogo (0 = omitido)
+  , envCSRegs :: [Reg]      -- caller-saved do pool em uso
+  }
+\end{minted}
+
+\subsection{Prólogo e Epílogo}
+
+\begin{minted}{haskell}
+prologue :: [Reg] -> Int -> [Instr]
+prologue csSaved fAdj =
+  [ Pushq (Reg RBP)
+  , Movq  (Reg RSP) (Reg RBP)
+  ]
+  ++ map (Pushq . Reg) csSaved
+  ++ [Subq (Imm fAdj) (Reg RSP) | fAdj > 0]
+
+epilogue :: Env -> [Instr]
+epilogue env =
+  [Addq (Imm (envFAdj env)) (Reg RSP) | envFAdj env > 0]
+  ++ map (Popq . Reg) (reverse (envCSaved env))
+  ++ [Popq (Reg RBP), Retq]
+\end{minted}
+
+Os registradores callee-saved são desempilhados em \emph{ordem inversa}:
+a pilha é LIFO.
+
+\subsection{Carregamento de Parâmetros}
+
+Após o prólogo, os parâmetros chegam nos registradores da ABI
+(\texttt{\%rdi}, \texttt{\%rsi}, \ldots). Se o coloridor atribuiu a um
+parâmetro $t$ um registrador diferente do ABI, é necessário um
+\texttt{movq}:
+
+\begin{minted}{haskell}
+loadParams :: [Temp] -> Coloring -> [Instr]
+loadParams params col = concat $ zipWith load params argRegs
+  where
+    load t r = case Map.lookup t col of
+      Just (InReg dr) | dr /= r -> [Movq (Reg r) (Reg dr)]
+      Just (InReg _)             -> []
+      Just (InMem off)           -> [Movq (Reg r) (Mem off RBP)]
+      Nothing                    -> []
+\end{minted}
+
+\subsection{Compilação de Expressões}
+
+\begin{minted}{haskell}
+compileExpr :: Env -> Expr -> X86M ()
+compileExpr _   (CONST n)  = emit (Movq (Imm n) (Reg scratchAcc))
+compileExpr env (TEMP t)   = loadTemp t (envCol env)
+compileExpr env (BINOP op e1 e2) = do
+  compileExpr env e1
+  pushScratch scratchAcc
+  compileExpr env e2
+  popScratch  scratchBinop
+  compileBinOp op
+compileExpr env (MEM e) = do
+  compileExpr env e
+  emit (Movq (Mem 0 scratchAcc) (Reg scratchAcc))
+compileExpr env (CALL (NAME f) args) = compileCall env f args
+compileExpr env (ESEQ s e) = do
+  compileStmt env s
+  compileExpr env e
+\end{minted}
+
+\subsection{Compilação de Enunciados}
+
+\begin{minted}{haskell}
+compileStmt :: Env -> Stmt -> X86M ()
+compileStmt env (MOVE (TEMP t) e) = do
+  compileExpr env e
+  storeTemp t (envCol env)
+compileStmt env (MOVE (MEM addrE) valE) = do
+  compileExpr env addrE
+  emit (Movq (Reg scratchAcc) (Reg scratchMem))
+  compileExpr env valE
+  emit (Movq (Reg scratchAcc) (Mem 0 scratchMem))
+compileStmt _   (LABEL l)           = emit (LocLabel l)
+compileStmt _   (JUMP (NAME l))     = emit (Jmp l)
+compileStmt env (CJUMP cond lt lf)  = do
+  compileExpr env cond
+  emit (Testq (Reg scratchAcc) (Reg scratchAcc))
+  emit (Jcc NE lt)
+  emit (Jmp lf)
+compileStmt env (RETURN [])    = mapM_ emit (epilogue env)
+compileStmt env (RETURN (e:_)) = do
+  compileExpr env e
+  mapM_ emit (epilogue env)
+compileStmt env (SEQ s1 s2) = do
+  compileStmt env s1
+  compileStmt env s2
+\end{minted}
+
+\subsection{Compilação de Funções}
+
+\begin{minted}{haskell}
+compileFunc :: FuncDef -> [Instr]
+compileFunc fd =
+  let body0             = canonicalize (funcBody fd)
+      (col, spillBytes) = colorFunc (funcParams fd) body0
+      csSaved           = calleeSavedInCol col
+      fAdj              = frameAdj (length csSaved) spillBytes
+      csRegs            = callerSavedInCol col
+      env               = Env col csSaved fAdj csRegs
+      stmts             = linearize body0
+      body              = run (mapM_ (compileStmt env) stmts)
+  in Dir "" :
+     Dir (".globl " ++ funcName fd) :
+     GlobLabel (funcName fd) :
+     prologue csSaved fAdj ++
+     loadParams (funcParams fd) col ++
+     body ++
+     epilogue env
+\end{minted}
+
+O epílogo ao final é um \textbf{caminho de fallthrough}: código
+tecnicamente morto quando toda saída da função termina com \texttt{RETURN},
+mas necessário para que a função \texttt{main} (que não possui
+\texttt{RETURN} explícito na IRT) retorne corretamente ao sistema operacional.
+
+\section{Exemplo Completo: \texttt{factorial}}
+
+\subsection{Fonte e IRT}
+
+O programa TImp:
+
+\begin{minted}{text}
+function factorial(n : int) : int {
+  if n == 0 then return 1
+  else return n * factorial(n - 1)
+}
+function main() : void {
+  print(factorial(read_int()))
+}
+\end{minted}
+
+Gera (após canonicalização) a IRT mostrada no capítulo anterior.
+Com a coloração \texttt{n}$\to$\texttt{\%rbx},
+\texttt{t0..t2}$\to$\texttt{\%r12},
+o compilador produz:
+
+\subsection{Assembly Gerado (trecho de \texttt{factorial})}
+
+\begin{minted}{asm}
+.globl factorial
+factorial:
+    pushq  %rbp
+    movq   %rsp, %rbp
+    pushq  %rbx           # salva %rbx (callee-saved, usado por n)
+    pushq  %r12           # salva %r12 (callee-saved, usado por t0/t1/t2)
+    # loadParams: n (em %rdi) → %rbx
+    movq   %rdi, %rbx
+    # MOVE(t0, BINOP(EQ, n, 0)):  %rbx == 0?
+    movq   %rbx, %rax
+    pushq  %rax           # salva n
+    movq   $0, %rax
+    popq   %r11           # %r11 = n
+    cmpq   %rax, %r11
+    sete   %al
+    movzbq %al, %rax
+    movq   %rax, %r12     # t0 → %r12
+    # CJUMP(t0, .true, .false)
+    movq   %r12, %rax
+    testq  %rax, %rax
+    jne    .L_if_true_0
+    jmp    .L_if_false_1
+.L_if_true_0:
+    movq   $1, %rax       # RETURN [1]
+    popq   %r12
+    popq   %rbx
+    popq   %rbp
+    retq
+.L_if_false_1:
+    # MOVE(t1, BINOP(SUB, n, 1))
+    movq   %rbx, %rax
+    pushq  %rax           # salva n
+    movq   $1, %rax
+    popq   %r11
+    negq   %rax
+    addq   %r11, %rax     # %rax = n - 1
+    movq   %rax, %r12     # t1 → %r12
+    # CALL(factorial, [t1]):  salva caller-saved antes
+    movq   %r12, %rdi     # arg = t1
+    xorq   %rax, %rax
+    callq  factorial
+    movq   %rax, %r12     # r → %r12
+    # MOVE(t2, BINOP(MUL, n, r))
+    movq   %rbx, %rax
+    pushq  %rax           # salva n
+    movq   %r12, %rax
+    popq   %r11
+    imulq  %r11, %rax     # %rax = n * r
+    movq   %rax, %r12     # t2 → %r12
+    # RETURN [t2]
+    movq   %r12, %rax
+    popq   %r12
+    popq   %rbx
+    popq   %rbp
+    retq
+.L_if_end_2:              # fallthrough (código morto)
+    popq   %r12
+    popq   %rbx
+    popq   %rbp
+    retq
+\end{minted}
+
+\begin{remark}
+  Observe que os temporários \texttt{t0}, \texttt{t1} e \texttt{r} são
+  todos mapeados a \texttt{\%r12}. Isso é correto porque os seus
+  intervalos de vivacidade não se sobrepõem: \texttt{t0} morre antes de
+  \texttt{t1} ser definido, e \texttt{t1} morre antes de \texttt{r} ser
+  definido. A coloração por grafo captura exatamente essa compatibilidade.
+\end{remark}
+
+\section{O Pipeline Completo}
+
+O back-end X86-64 é acionado pelo subcomando \texttt{--x86} do compilador
+\texttt{timp}:
+
+\begin{minted}{haskell}
+run (Options CompileX86 fname) = do
+  src <- readFile fname
+  case timpParser src of
+    Left err  -> putStrLn ("Parse error:\n" ++ err)
+    Right ast ->
+      case typeCheck ast of
+        Left err -> putStrLn ("Type error: " ++ err)
+        Right _  ->
+          case compileTImp ast of
+            Left err   -> putStrLn ("Code generation error: " ++ err)
+            Right prog -> do
+              let asmFile = fname -<.> "s"
+              writeFile asmFile (pretty (irToX86 prog))
+              putStrLn ("X86-64 assembly written to " ++ asmFile)
+\end{minted}
+
+O fluxo completo é:
+
+\begin{center}
+  \begin{tabular}{ll}
+    \toprule
+    Fase & Módulo principal \\
+    \midrule
+    Análise léxica        & \texttt{TImp.Frontend.Lexer.TImpLexer} \\
+    Análise sintática     & \texttt{TImp.Frontend.Parser.TImpParser} \\
+    Verificação de tipos  & \texttt{TImp.Frontend.TypeCheck.TImpTypeCheck} \\
+    Geração de IRT        & \texttt{TImp.Backend.IR.TImpCodegen} \\
+    Canonicalização       & \texttt{IR.Backend.X86.CFG}
+    (\texttt{canonicalize}) \\
+    Vivacidade            & \texttt{IR.Backend.X86.Liveness} \\
+    Grafo de interferência & \texttt{IR.Backend.X86.IGraph} \\
+    Intervalos            & \texttt{IR.Backend.X86.Intervals} \\
+    Coloração             & \texttt{IR.Backend.X86.GraphColor} \\
+    Seleção de instruções & \texttt{IR.Backend.X86.IRToX86} \\
+    Impressão             & \texttt{IR.Backend.X86.X86Pretty} \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+Para compilar, montar e executar:
+
+\begin{verbatim}
+cabal run timp -- --x86 --file examples/factorial.timp
+gcc -o factorial examples/factorial.s -no-pie
+echo 10 | ./factorial    # deve imprimir 3628800
+\end{verbatim}
+
+\section{Comparação dos Três Back-Ends}
+
+O compilador TImp oferece três estratégias de geração de código, cada uma
+com características distintas:
+
+\begin{center}
+  \begin{tabular}{llll}
+    \toprule
+    Aspecto & Back-end C & Back-end WAT & Back-end X86-64 \\
+    \midrule
+    Alocação de regs & compilador C & máquina de pilha & grafo de coloração \\
+    ABI & do compilador C & do runtime WAT & System V AMD64 \\
+    Portabilidade & qualquer plataforma & browser / WASI & Linux x86-64 \\
+    Dependência externa & GCC / Clang & \texttt{wat2wasm} & apenas
+    GCC (linker) \\
+    Esforço de implem. & baixo & médio & alto \\
+    Controle sobre o código & baixo & médio & total \\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+O back-end C delega o trabalho duro ao compilador C hospedeiro.
+O back-end WAT tira proveito da máquina de pilha do WebAssembly para
+simplificar a geração de código. O back-end X86-64 é o mais trabalhoso,
+mas fecha o ciclo completo: nenhuma ferramenta de otimização externa é
+necessária, e cada instrução gerada é resultado de uma decisão explícita
+do compilador.
+
+\section{Conclusão}
+
+A geração de código X86-64 encerra o ciclo de compilação iniciado com a
+análise léxica. Com a seleção de instruções concluída, o compilador TImp
+é capaz de traduzir um programa de alto nível em instruções de máquina
+reais, sem intermediários além do linker.
+
+Os três capítulos deste módulo cobriram os desafios fundamentais de qualquer
+back-end nativo:
+
+\begin{itemize}
+  \item \textbf{Canonicalização}: torna a IRT linear e adequada para análise
+    de fluxo, eliminando efeitos colaterais escondidos em posições de expressão.
+  \item \textbf{Vivacidade e interferência}: determinam quais temporários
+    podem compartilhar registradores, formulando o problema de alocação como
+    coloração de grafo.
+  \item \textbf{Seleção de instruções}: traduz cada nó da IRT para instruções
+    concretas, gerenciando o protocolo de chamada e o alinhamento de pilha.
+\end{itemize}
+
+As invariantes mantidas pelo gerador — resultado de expressão sempre em
+\texttt{\%rax}, \texttt{\%rsp} múltiplo de 16 antes de todo \texttt{callq},
+registradores callee-saved preservados em torno de cada retorno —
+são as garantias que permitem ao código gerado interoperar corretamente
+com a libc e com qualquer outro código compilado para o mesmo ABI.

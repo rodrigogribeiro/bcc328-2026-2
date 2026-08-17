@@ -1,0 +1,529 @@
+\chapter{A Pesquisa em Compiladores}
+
+\section{Introdução}
+
+Um compilador é um dos softwares mais críticos de um ecossistema de
+desenvolvimento: todo programa escrito em uma linguagem de alto nível
+passa por ele. Um bug no compilador pode silenciosamente introduzir
+erros em código que parece correto, comprometer a segurança de sistemas
+inteiros ou impedir otimizações que o programador assume presentes.
+Por isso, a pesquisa em compiladores vai muito além da construção de
+compiladores corretos por construção: ela estuda como \emph{testá-los},
+como \emph{prová-los formalmente corretos}, como \emph{enriquecer as
+linguagens-fonte} com sistemas de tipos mais expressivos, e como
+\emph{representar e transformar programas} de maneira eficiente e
+verificável.
+
+Este capítulo apresenta uma panorâmica dos tópicos de pesquisa mais
+ativos na área, com o objetivo de indicar caminhos para aprofundamento.
+Cada seção apresenta a motivação, os conceitos centrais e exemplos
+concretos, seguidos de referências à literatura.
+
+\section{Teste de Compiladores}
+
+\subsection{O Problema}
+
+Compiladores são programas grandes e complexos. O GCC possui mais de
+15 milhões de linhas de código; o LLVM, mais de 20 milhões. Encontrar
+bugs em compiladores (especialmente \emph{wrong-code bugs}, nos quais
+o compilador gera código que produz resultado errado mas não trava)
+é notoriamente difícil com testes manuais.
+
+\subsection{Geração Aleatória de Programas (Fuzzing)}
+
+A abordagem mais influente é gerar programas válidos aleatoriamente e
+verificar se o compilador se comporta corretamente ao compilá-los. A
+ferramenta \textbf{CSmith} [Yang et al., 2011] gera programas C
+aleatórios com semântica definida (sem comportamento indefinido) e
+descobriu centenas de bugs em GCC e LLVM. A ideia central é simples:
+
+\begin{enumerate}
+  \item Gerar um programa aleatório \(P\) com saída bem definida.
+  \item Compilar \(P\) com múltiplos compiladores e com múltiplos
+    níveis de otimização.
+  \item Comparar as saídas: discrepâncias indicam bugs.
+\end{enumerate}
+
+Esse princípio chama-se \textbf{teste diferencial} (\emph{differential
+testing}). Ele não requer um oráculo que saiba a resposta correta:
+basta que dois compiladores corretos concordem.
+
+\subsection{Teste Baseado em Propriedades}
+
+Uma abordagem complementar é o \textbf{teste baseado em propriedades}
+(\emph{property-based testing}), popularizado pela biblioteca QuickCheck
+[Claessen \& Hughes, 2000]: em vez de casos de teste fixos, o
+programador especifica \emph{propriedades} que o compilador deve
+satisfazer, e a ferramenta gera inputs aleatórios para falsificá-las.
+
+Por exemplo, a propriedade de \textbf{equivalência semântica após
+otimização} pode ser expressa assim:
+
+\begin{quote}
+  Para todo programa \(P\) bem tipado,
+  \(\llbracket P \rrbracket = \llbracket \mathit{opt}(P) \rrbracket\).
+\end{quote}
+
+onde \(\llbracket \cdot \rrbracket\) denota a semântica operacional e
+\(\mathit{opt}\) é uma passagem de otimização.
+
+\subsection{Testes de Metamorfose}
+
+\textbf{Metamorphic testing} [Le et al., 2014] aplica transformações
+semânticas conhecidas ao programa-fonte e verifica se o compilador
+preserva o resultado. Uma relação metamórfica útil é:
+
+\begin{quote}
+  Se \(P'\) é obtido de \(P\) por substituição de \(x + 0\) por \(x\),
+  então \(P\) e \(P'\) devem produzir o mesmo resultado compilados.
+\end{quote}
+
+\section{Verificação Formal de Compiladores}
+
+\subsection{Preservação Semântica}
+
+Um compilador \(\mathcal{C}\) de linguagem-fonte \(\mathcal{L}_s\) para
+linguagem-alvo \(\mathcal{L}_t\) é \textbf{correto} se, para todo
+programa \(P\) bem tipado e toda entrada \(i\):
+
+\[
+P \Downarrow v \implies \mathcal{C}(P) \Downarrow v
+\]
+
+onde \(\Downarrow\) denota avaliação segundo a semântica operacional de
+cada linguagem. Em palavras: a compilação preserva o comportamento
+observável do programa. Esta propriedade é chamada de
+\textbf{preservação semântica} (\emph{semantic preservation}).
+
+\subsection{CompCert}
+
+O \textbf{CompCert} [Leroy, 2009] é o primeiro compilador de uso real
+com preservação semântica provada formalmente. Ele compila um
+subconjunto significativo de C para assembly x86, PowerPC e ARM. Toda
+passagem do compilador (análise de fluxo, alocação de
+registradores, geração de código) é acompanhada de uma prova
+mecânica no assistente de provas \textbf{Coq} de que ela não altera o
+comportamento do programa.
+
+O resultado prático é notável: um estudo com CSmith descobriu que
+\textbf{nenhum} wrong-code bug existe no CompCert, enquanto GCC e LLVM
+apresentaram dezenas.
+
+\subsection{A Estrutura de uma Prova de Compilador}
+
+Cada passagem \(\mathcal{T}\) é acompanhada de uma \textbf{relação de
+simulação}:
+
+\[
+\infer[\text{Sim}]
+  {e \xrightarrow{*} v \implies \mathcal{T}(e) \xrightarrow{*} v}
+  {e \xrightarrow{} e' \quad \mathcal{T}(e) \xrightarrow{*} \mathcal{T}(e')}
+\]
+
+A composição de simulações para cada passagem produz a preservação
+semântica global.
+
+\subsection{Verificação de Passagens Específicas}
+
+Nem sempre é necessário verificar o compilador inteiro. Pesquisas
+recentes verificam passagens individuais de alta importância:
+
+\begin{itemize}
+  \item \textbf{Alocação de registradores} [Rideau \& Leroy, 2010]:
+    uma das passagens mais complexas do GCC foi verificada no Coq.
+  \item \textbf{Compilação de JIT} [Carbonneaux et al., 2014]:
+    verificação de compiladores just-in-time com garantias de tempo real.
+  \item \textbf{Otimizações em LLVM} [Lopes et al., 2015]: a ferramenta
+    \textbf{Alive} verifica automaticamente a correção de transformações
+    de peephole do LLVM usando SMT solvers.
+\end{itemize}
+
+\section{Sistemas de Tipos Avançados}
+
+\subsection{Tipos Dependentes}
+
+Em um sistema de tipos comum, tipos e valores habitam mundos separados:
+tipos \emph{classificam} valores, mas valores não podem aparecer em
+tipos. \textbf{Tipos dependentes} eliminam essa separação: tipos podem
+\emph{depender} de valores.
+
+O exemplo canônico é o vetor de tamanho estático:
+
+\[
+\mathsf{Vec} : \mathbb{N} \to \mathsf{Type} \to \mathsf{Type}
+\]
+
+\(\mathsf{Vec}\; n\; A\) é o tipo dos vetores com exatamente \(n\)
+elementos do tipo \(A\). A função de concatenação tem tipo:
+
+\[
+\mathsf{append} : \mathsf{Vec}\; m\; A \to \mathsf{Vec}\; n\; A \to \mathsf{Vec}\; (m + n)\; A
+\]
+
+O compilador verifica \emph{em tempo de compilação} que \(m + n\) é o
+tamanho correto do resultado. Funções que tentariam acessar um índice
+fora do intervalo são rejeitadas pelo verificador de tipos antes de
+existir qualquer código gerado.
+
+\textbf{Linguagens com tipos dependentes:} Agda [Norell, 2007], Idris
+[Brady, 2013], Coq [Bertot \& Castéran, 2004], Lean 4 [de Moura et
+al., 2021].
+
+\textbf{Desafio para compiladores:} inferência de tipos em sistemas
+dependentes é em geral indecidível; compiladores exigem anotações
+explícitas e resolvem equações em que valores e tipos se misturam.
+
+\subsection{Tipos Lineares}
+
+Um \textbf{tipo linear} garante que um recurso é usado \emph{exatamente
+uma vez}: nem descartado sem uso, nem duplicado. A regra de
+\textbf{weakening} (descartar uma variável não usada) e a de
+\textbf{contraction} (duplicar uma variável) são proibidas para tipos
+lineares.
+
+O exemplo motivador é o tratamento de recursos:
+
+\begin{verbatim}
+open   : String → File         -- abre arquivo
+read   : File   → (String, File)
+close  : File   → Unit
+\end{verbatim}
+
+Com tipos lineares, o compilador garante que:
+
+\begin{itemize}
+  \item Todo arquivo aberto é fechado exatamente uma vez.
+  \item Não existe \emph{use after free}.
+  \item Não existe \emph{double close}.
+\end{itemize}
+
+Se o programador tentar usar \texttt{f} após chamar \texttt{close f},
+o verificador de tipos emite um erro em tempo de compilação.
+
+\textbf{Conexão com Rust:} O sistema de \emph{ownership} e
+\emph{borrows} do Rust é uma forma de tipos lineares/afins integrada
+a uma linguagem de sistemas. O compilador Rust garante ausência de
+data races e uso de memória liberada por construção, sem garbage
+collector.
+
+\textbf{Base teórica:} Lógica Linear [Girard, 1987];
+\emph{Linear Type Theory} [Wadler, 1990];
+\emph{Quantitative Type Theory} [Atkey, 2018].
+
+\subsection{Session Types}
+
+\textbf{Session types} tipam canais de comunicação, descrevendo o
+\emph{protocolo} que as duas pontas de um canal devem seguir. O tipo
+de um canal especifica a sequência de mensagens enviadas e recebidas,
+e o compilador verifica que ambas as pontas seguem o protocolo.
+
+O protocolo de um servidor de calculadora pode ser descrito por:
+
+\[
+S = \mathsf{!Int}.\; \mathsf{!Int}.\; \mathsf{?Int}.\; \mathsf{end}
+\]
+
+Que se lê: ``envie um inteiro, envie outro inteiro, receba um inteiro,
+encerre''. O tipo do cliente é o \textbf{dual} \(\bar{S}\):
+
+\[
+\bar{S} = \mathsf{?Int}.\; \mathsf{?Int}.\; \mathsf{!Int}.\; \mathsf{end}
+\]
+
+O compilador garante que cliente e servidor nunca ficam em
+\emph{deadlock} e que não há erros de protocolo (\emph{type mismatches})
+em tempo de execução.
+
+\textbf{Linguagens:} Links [Cooper et al., 2006], Scala com
+bibliotecas de session types, extensões para Haskell e Rust.
+\textbf{Base teórica:} \emph{Session Types} [Honda, 1993];
+\emph{A Theory of Communication} [Honda et al., 1998].
+
+\section{Representações Intermediárias}
+
+\subsection{Static Single Assignment (SSA)}
+
+A forma \textbf{SSA} (\emph{Static Single Assignment}) [Cytron et al.,
+1991] é uma representação intermediária em que \textbf{cada variável é
+atribuída exatamente uma vez}. Programas com atribuições múltiplas são
+transformados introduzindo novas versões de cada variável:
+
+\textbf{Antes da SSA:}
+
+\begin{verbatim}
+x = 0
+x = x + 1
+y = x * 2
+if b:
+    x = 5
+else:
+    x = 10
+z = x + y
+\end{verbatim}
+
+\textbf{Após a forma SSA:}
+
+\begin{verbatim}
+x0 = 0
+x1 = x0 + 1
+y0 = x1 * 2
+if b:
+    x2 = 5
+else:
+    x3 = 10
+x4 = phi(x2, x3)
+z0 = x4 + y0
+\end{verbatim}
+
+A \textbf{função \(\phi\)} (phi-function) nos pontos de junção de
+fluxo de controle seleciona o valor correto da variável dependendo do
+caminho percorrido em tempo de execução. Ela não corresponde a uma
+instrução de máquina: é uma notação da forma intermediária eliminada
+durante a geração de código.
+
+\textbf{Por que SSA facilita otimizações?} Como cada variável é
+definida num único ponto, a análise de \emph{use-def chains} se torna
+trivial: o único lugar onde \(x_4\) é definido é a phi-function, e o
+único lugar onde é usada é \(z_0 = x_4 + y_0\). Isso acelera:
+
+\begin{itemize}
+  \item \textbf{Propagação de constantes:} se \(x_0 = 0\) e
+    \(x_1 = x_0 + 1\), então \(x_1 = 1\) pode ser propagado
+    diretamente.
+  \item \textbf{Eliminação de código morto:} variáveis sem uso são
+    imediatamente identificáveis.
+  \item \textbf{Alocação de registradores:} interferência entre
+    variáveis é calculada eficientemente sobre o grafo de interferência
+    induzido pela SSA.
+\end{itemize}
+
+A SSA é a representação central do \textbf{LLVM IR} e do \textbf{GCC
+GIMPLE}.
+
+\subsection{Value State Dependence Graph (VSDG)}
+
+O \textbf{VSDG} [Johnson et al., 2004] é uma representação baseada em
+grafos que torna explícitas as dependências entre operações ao invés de
+apenas ordená-las sequencialmente. Ao contrário da SSA, que ainda é
+essencialmente uma sequência de instruções com anotações, o VSDG
+representa o programa como um grafo dirigido acíclico (DAG) com três
+tipos de aresta:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Tipo de aresta & Significado \\
+\midrule
+\textbf{Valor}   & O resultado de uma operação é entrada de outra \\
+\textbf{Estado}  & Uma operação com efeito deve preceder outra (ex.: leituras/escritas) \\
+\textbf{Controle}& Uma operação só executa se uma condição for satisfeita \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Exemplo:} o programa
+
+\begin{verbatim}
+x = a + b
+y = a + b
+z = x * y
+\end{verbatim}
+
+na SSA geraria dois nós \texttt{add} separados. No VSDG, as duas
+computações de \texttt{a + b} são representadas pelo \emph{mesmo} nó,
+pois são idênticas. Isso torna a \textbf{eliminação de subexpressões
+comuns} (\emph{CSE}) \emph{gratuita}: é uma propriedade estrutural
+da representação, não uma passagem separada.
+
+\textbf{Dependências de estado} tornam explícito o sequenciamento de
+operações com efeitos colaterais. No VSDG, \texttt{read(x)} e
+\texttt{write(x,~v)} têm uma aresta de estado entre si; duas leituras
+independentes \emph{não} têm aresta entre si e podem ser reordenadas
+livremente pelo compilador.
+
+\textbf{Scheduling:} a partir do VSDG, a ordem de execução é
+determinada por um algoritmo de \emph{scheduling} que percorre o grafo
+respeitando apenas as dependências reais. Isso habilita reordenações de
+instruções que seriam difíceis de detectar na SSA.
+
+\section{Otimização de Código}
+
+\subsection{Passos Clássicos}
+
+As passagens de otimização mais fundamentais são:
+
+\textbf{Constant folding e constant propagation:} expressões cujos
+operandos são conhecidos em tempo de compilação são avaliadas pelo
+compilador.
+
+\[
+\mathit{fold}(3 + 4) = 7 \qquad
+\mathit{fold}(\mathit{if}\ \mathsf{true}\ \mathsf{then}\ e_1\ \mathsf{else}\ e_2) = e_1
+\]
+
+\textbf{Eliminação de código morto} (\emph{DCE}, \emph{Dead Code
+Elimination}): código cujo resultado nunca é observado é removido. Na
+forma SSA, uma variável é morta se não tem usos.
+
+\textbf{Inlining:} substituição de uma chamada de função pelo corpo da
+função, com os parâmetros formais substituídos pelos argumentos reais.
+Elimina o overhead de chamada e expõe outras oportunidades de
+otimização.
+
+\textbf{Loop transformations:} rotações, unrolling e vetorização de
+laços para explorar o paralelismo de dados (SIMD) dos processadores
+modernos.
+
+\subsection{LLVM como Infraestrutura de Pesquisa}
+
+O \textbf{LLVM} [Lattner \& Adve, 2004] tornou-se a principal
+plataforma de pesquisa em otimização de compiladores. Sua arquitetura
+modular expõe um \emph{pass manager} no qual novas passagens de
+otimização podem ser inseridas com poucas linhas de código. O
+\textbf{LLVM IR} (uma forma de SSA com tipagem estática) serve de
+entrada para dezenas de passagens clássicas e experimentais:
+
+\begin{itemize}
+  \item \texttt{mem2reg}: eleva alocações em memória para variáveis
+    SSA (a própria transformação SSA).
+  \item \texttt{instcombine}: milhares de reescritas algébricas locais.
+  \item \texttt{loop-vectorize}: vetorização automática de laços.
+  \item \texttt{polly}: otimizações de laços com o modelo poliédrico.
+\end{itemize}
+
+\textbf{Ferramenta de validação: Alive2} [Lopes et al., 2021] verifica
+automaticamente, via SMT (Z3), se cada transformação do
+\texttt{instcombine} preserva a semântica para todas as entradas
+possíveis. Bugs encontrados por Alive2 foram corrigidos em versões
+oficiais do LLVM.
+
+\subsection{Otimização Guiada por Perfil}
+
+\textbf{Profile-Guided Optimization (PGO)} coleta dados de execuções
+reais do programa (frequência de cada bloco básico, alvos de chamadas
+indiretas) e os usa para tomar decisões de otimização mais precisas:
+
+\begin{itemize}
+  \item Funções frequentemente chamadas são prioritárias para inlining.
+  \item Blocos básicos frequentes são colocados em caminhos de execução
+    rápidos (\emph{branch layout}).
+  \item Tabelas de despacho virtual são ordenadas por frequência.
+\end{itemize}
+
+PGO é central em compiladores de produção como o Clang e o JIT do V8
+(JavaScript).
+
+\section{Conclusão}
+
+A pesquisa em compiladores é um campo de fronteira que combina
+preocupações práticas (desempenho, correção, segurança) com as
+ferramentas mais sofisticadas da teoria de linguagens de programação.
+As quatro frentes apresentadas neste capítulo são complementares: a
+pesquisa em testes descobre bugs existentes em compiladores reais; a
+verificação formal elimina categorias inteiras de bugs por construção;
+os sistemas de tipos avançados tornam os compiladores capazes de
+garantir propriedades mais ricas sobre os programas que aceitam; e as
+representações intermediárias e as técnicas de otimização determinam
+a qualidade do código gerado.
+
+O estudo formal de compiladores que percorre estas notas de aula, da
+análise léxica e sintática à geração de código intermediário, passando
+por semântica operacional, sistemas de tipos e inferência de tipos,
+é a base necessária para contribuir nessas frentes. Os compiladores
+provados corretos, como o CompCert, dependem de semânticas
+operacionais rigorosas e de relações de simulação análogas às
+estudadas nos capítulos de subtipagem e preservação. Os sistemas de
+tipos avançados, como tipos dependentes e lineares, são extensões
+diretas dos sistemas de tipos simples e da inferência de Hindley-Milner
+apresentados nos capítulos anteriores. A forma SSA e o VSDG são
+transformações da representação intermediária estudada na última parte
+do texto.
+
+A fronteira mais ativa da área é, atualmente, a interseção entre
+verificação formal e otimização: ferramentas como o Alive2 aplicam
+raciocínio automático para verificar que transformações de otimização
+são corretas para \emph{todas} as entradas possíveis, aproximando o
+nível de garantia do CompCert ao mundo das otimizações agressivas do
+LLVM. Ao mesmo tempo, a proliferação de linguagens com sistemas de
+tipos mais expressivos (Rust com \emph{ownership}, Lean 4 com tipos
+dependentes, Haskell com tipos lineares opcionais) coloca novos
+desafios para a teoria e a implementação de compiladores, desafios que
+as ferramentas formais desenvolvidas nos capítulos anteriores estão
+bem posicionadas para enfrentar.
+
+\section{Referências}
+
+\subsection{Teste de Compiladores}
+
+\begin{itemize}
+  \item Yang, X., Chen, Y., Eide, E., \& Regehr, J. (2011).
+    \textbf{Finding and understanding bugs in C compilers.}
+    \emph{PLDI 2011}.
+  \item Claessen, K., \& Hughes, J. (2000).
+    \textbf{QuickCheck: a lightweight tool for random testing of
+    Haskell programs.} \emph{ICFP 2000}.
+  \item Le, V., Afshari, M., \& Su, Z. (2014).
+    \textbf{Compiler validation via equivalence modulo inputs.}
+    \emph{PLDI 2014}.
+\end{itemize}
+
+\subsection{Verificação Formal}
+
+\begin{itemize}
+  \item Leroy, X. (2009).
+    \textbf{Formal verification of a realistic compiler.}
+    \emph{CACM 52(7)}.
+  \item Lopes, N. P., Menendez, D., Nagarakatte, S., \& Regehr, J.
+    (2015). \textbf{Provably correct peephole optimizations with Alive.}
+    \emph{PLDI 2015}.
+  \item Rideau, L., \& Leroy, X. (2010).
+    \textbf{Validating register allocation and spilling.} \emph{CC 2010}.
+\end{itemize}
+
+\subsection{Sistemas de Tipos Avançados}
+
+\begin{itemize}
+  \item Pierce, B. C. (2002).
+    \textbf{Types and Programming Languages.} MIT Press.
+    \emph{(Capítulos 23--32 cobrem sistemas avançados de tipos.)}
+  \item Brady, E. (2013).
+    \textbf{Idris, a general purpose dependently typed programming
+    language.} \emph{Journal of Functional Programming 23(5)}.
+  \item Wadler, P. (1990).
+    \textbf{Linear types can change the world!}
+    \emph{IFIP TC 2 Working Conference on Programming Concepts and
+    Methods}.
+  \item Honda, K., Vasconcelos, V. T., \& Kubo, M. (1998).
+    \textbf{Language primitives and type discipline for structured
+    communication-based programming.} \emph{ESOP 1998}.
+\end{itemize}
+
+\subsection{Formas Intermediárias e Otimização}
+
+\begin{itemize}
+  \item Cytron, R., Ferrante, J., Rosen, B. K., Wegman, M. N., \&
+    Zadeck, F. K. (1991). \textbf{Efficiently computing static single
+    assignment form and the control dependence graph.}
+    \emph{TOPLAS 13(4)}.
+  \item Johnson, N., \& Mycroft, A. (2004).
+    \textbf{Combined code motion and register allocation using the
+    Value State Dependence Graph.} \emph{CC 2004}.
+  \item Lattner, C., \& Adve, V. (2004).
+    \textbf{LLVM: a compilation framework for lifelong program analysis
+    and transformation.} \emph{CGO 2004}.
+  \item Lopes, N. P., Lee, J., Hur, C.-K., Liu, Z., \& Regehr, J.
+    (2021). \textbf{Alive2: bounded translation validation for LLVM.}
+    \emph{PLDI 2021}.
+\end{itemize}
+
+\subsection{Leituras Complementares}
+
+\begin{itemize}
+  \item Appel, A. W. (1998).
+    \textbf{Modern Compiler Implementation in ML.}
+    Cambridge University Press.
+  \item Cooper, K., \& Torczon, L. (2011).
+    \textbf{Engineering a Compiler} (2ª ed.). Morgan Kaufmann.
+  \item Winskel, G. (1993).
+    \textbf{The Formal Semantics of Programming Languages.} MIT Press.
+\end{itemize}

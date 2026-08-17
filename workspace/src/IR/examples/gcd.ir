@@ -1,0 +1,22 @@
+-- Greatest common divisor (iterative Euclidean algorithm).
+--
+-- gcd(a, 0) = a
+-- gcd(a, b) = gcd(b, a mod b)
+
+func gcd(a, b) {
+  SEQ(LABEL(loop),
+  SEQ(CJUMP(BINOP(EQ, TEMP(b), CONST(0)), done, step),
+  SEQ(LABEL(step),
+  SEQ(MOVE(TEMP(t), BINOP(MOD, TEMP(a), TEMP(b))),
+  SEQ(MOVE(TEMP(a), TEMP(b)),
+  SEQ(MOVE(TEMP(b), TEMP(t)),
+  SEQ(JUMP(NAME(loop)),
+  SEQ(LABEL(done),
+      RETURN(TEMP(a))))))))))
+}
+
+-- Entry point: compute gcd(48, 18) = 6 and print it.
+func main() {
+  SEQ(MOVE(TEMP(result), CALL(NAME(gcd), CONST(48), CONST(18))),
+      EXP(CALL(NAME(print), TEMP(result))))
+}

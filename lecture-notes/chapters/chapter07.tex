@@ -1,0 +1,582 @@
+\chapter{Parsing expression grammars}
+
+\section{Introdução}
+
+No capítulo anterior, estudamos os combinadores de parsing como uma
+forma de implementar analisadores sintáticos descendentes recursivos.
+Neste capítulo, vamos estudar um formalismo que permite a definição
+de analisadores sintáticos diretamente, sem a necessidade de usar uma
+gramática livre de contexto. Esse formalismo são as \textbf{Parsing
+Expression Grammars} (PEGs), introduzidas por Bryan Ford em 2004.
+
+As PEGs compartilham com as gramáticas livres de contexto (GLCs) a
+ideia de descrever linguagens por meio de regras de reescrita, mas
+diferem em um ponto fundamental: enquanto as GLCs usam
+\textbf{escolha não-determinística} entre as alternativas de uma
+produção, as PEGs usam \textbf{escolha ordenada}. Em vez de tentar
+todas as alternativas em paralelo (como faz um autômato
+não-determinístico), uma PEG experimenta as alternativas em ordem e
+se compromete com a primeira que tiver sucesso. Essa semântica
+determinística elimina a ambiguidade presente em gramáticas e
+expressões regulares.
+
+O código discutido neste capítulo está disponível nos módulos
+\begin{flushleft}
+  \verb|PEG|, \verb|PEG.QQ|, \verb|PEG.Examples.Arith| e
+  \verb|PEG.Examples.Layout|.
+\end{flushleft}
+
+\section{Sintaxe e semântica de PEGs}
+
+Uma PEG é composta por um conjunto de \textbf{regras de parsing},
+cada uma associando um nome (não-terminal) a uma \textbf{expressão de
+parsing}. As expressões de parsing são construídas a partir dos
+seguintes operadores:
+
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{lll}
+    \toprule
+    Expressão & Nome & Descrição \\
+    \midrule
+    $\varepsilon$   & vazio              & Sempre tem sucesso sem
+    consumir entrada \\
+    $a$             & terminal           & Consome e casa com o símbolo $a$ \\
+    $A$             & não-terminal       & Invoca a regra de nome $A$ \\
+    $e_1\; e_2$     & sequência          & Tenta $e_1$ e depois $e_2$ \\
+    $e_1 / e_2$     & escolha ordenada   & Tenta $e_1$; se falhar,
+    tenta $e_2$ \\
+    $e^*$           & repetição          & Zero ou mais repetições de
+    $e$ (gulosa) \\
+    $e^+$           & repetição positiva & Uma ou mais repetições de $e$ \\
+    $e\,?$          & opcional           & Zero ou uma ocorrência de $e$ \\
+    $!e$            & predicado negativo & Sucesso se $e$ falhar; não
+    consome entrada \\
+    $\& e$          & predicado positivo & Sucesso se $e$ tiver
+    sucesso; não consome entrada \\
+    \bottomrule
+  \end{tabular}
+  \caption{Operadores de PEG}
+\end{table}
+
+Uma PEG é então um conjunto de regras da forma \(A \leftarrow e\), em
+que \(A\) é um não-terminal e \(e\) é uma expressão de parsing. Uma
+das regras é designada como \textbf{regra inicial}.
+
+Como exemplo, a seguinte PEG descreve a linguagem de expressões
+aritméticas com precedência e associatividade já embutidas na gramática:
+
+\[
+  \begin{array}{lcl}
+    E & \leftarrow & T\,(\texttt{+}\, T)^\star\\
+    T & \leftarrow & F\,(*\, F)^\star\\
+    F & \leftarrow & \texttt{(}\, E\, \texttt{)} \,/\, [0\text{-}9]^+
+  \end{array}
+\]
+
+Comparada à GLC equivalente, a PEG não precisa de produções
+recursivas à esquerda para expressar associatividade à esquerda: o
+operador \((\cdot)^*\) captura diretamente a ideia de ``zero ou mais
+ocorrências à direita'', que é processada iterativamente.
+
+A semântica de uma PEG é definida em termos de uma função de parsing
+que, dado uma expressão \(e\) e uma entrada \(s\), retorna ou um
+\textbf{sucesso} que consiste de um par formado com a parte da
+entrada consumida e o restante ainda não processado; ou uma \textbf{falha}.
+
+A diferença crucial em relação às GLCs está na semântica da
+\textbf{escolha ordenada} \(e_1 / e_2\):
+Tenta-se \(e_1\) sobre a entrada \(s\). Se \(e_1\) \textbf{tem
+sucesso}, o resultado é imediatamente retornado e \(e_2\) nunca é
+tentada. Se \(e_1\) \textbf{falha}, então \(e_2\) é executada sobre
+a entrada \(s\).
+
+\subsection{Predicados}
+
+Os predicados \(!e\) e \(\&\,e\) permitem analisar parte da entrada
+sem necessariamente consumir parte dela. Temos os seguintes
+operadores de predicado:
+
+\begin{itemize}
+  \item
+    \(!e\) (\textbf{predicado negativo}): tem sucesso se e somente se
+    \(e\) falha. Nenhuma entrada é consumida em nenhum caso.
+  \item
+    \(\&\,e\) (\textbf{predicado positivo}): tem sucesso se e somente
+    se \(e\) tem sucesso. Nenhuma entrada é consumida. É equivalente
+    a \(!(!e)\).
+\end{itemize}
+
+Os predicados são úteis para especificar restrições contextuais sem
+avançar na entrada. Por exemplo, para reconhecer uma palavra
+reservada como if sem aceitar um
+identificador como iff, podemos escrever:
+
+\[
+  \texttt{if}\, !\,[a\text{-}zA\text{-}Z0\text{-}9]
+\]
+
+Isso garante que \haskell|if| só é reconhecido quando
+não seguido de um caractere alfanumérico.
+
+\subsection{Repetição}
+
+O operador \(e^*\) é definido recursivamente como:
+
+\[
+  e^* \leftarrow e\, e^* \,/\,\varepsilon
+\]
+
+Como a escolha é ordenada, a repetição é \textbf{gulosa}: o parser
+sempre tenta consumir mais uma ocorrência de \(e\) antes de aceitar o
+caso vazio. Isso garante que \(e^*\) sempre consumirá o maior prefixo
+possível que case com \(e\).
+
+Ao contrário das GLCs, não há ambiguidade em \(e^*\): o resultado é
+determinístico e único para qualquer entrada.
+
+\subsection{Terminação em PEGs}
+
+PEGs podem ser vistas como uma representação de analisadores
+descendentes recursivos e, portanto, possuem limitações similares. A
+terminação do processo de parsing de um PEG é garantido de terminar
+se a gramática atende as seguintes restrições:
+
+\begin{itemize}
+  \item
+    Não possui regras recursivas à esquerda, diretas ou indiretas;
+  \item
+    Toda ocorrência de repetição, \(e^*\) é tal que \(e\) não deve
+    ter sucesso sem consumir símbolos da entrada.
+\end{itemize}
+
+A primeira restrição é óbvia: pois faz com que analisadores
+descendentes entrem em loop. A segunda é necessária devido à
+semântica gulosa do operador de repetição: ele sempre tentará casar a
+expressão \(e\) antes de finalizar a repetição. Se \(e\) tiver
+sucesso sem consumir entrada, então \(e^*\) pode, a cada iteração,
+consumir um prefixo vazio da entrada, o que leva a não terminação.
+
+Dizemos que uma PEG é \textbf{bem formada} se ela atende as duas
+restrições mencionadas. Para PEGs bem formadas há uma garantia formal
+de que o processo de parsing sempre termina.
+
+\section{Implementação tipada de PEGs em Haskell}
+
+A implementação de PEGs em Haskell neste capítulo segue uma abordagem
+sofisticada baseada em tipos dependentes superficiais (\emph{lightweight
+dependent types}): as garantias de boa-formação são verificadas
+\textbf{em tempo de compilação} pelo sistema de tipos de Haskell, por
+meio de GADTs, famílias de tipos e restrições de classe.
+
+A ideia central é associar a cada expressão de parsing um
+\textbf{tipo de PEG} \((\eta, F)\), onde \(\eta\) indica se a expressão pode
+ter sucesso sem consumir entrada (\emph{nullable}) e \(F\) é um
+sobre-conjunto dos não-terminais que podem aparecer na posição
+mais à esquerda de uma derivação (\emph{head set}). Com essas
+informações disponíveis no nível de tipos, o compilador Haskell rejeita
+automaticamente gramáticas mal-formadas.
+
+\subsection{Tipos de PEG}
+
+O tipo de PEG é representado em Haskell como um tipo de dados
+promovido:
+
+\begin{minted}{haskell}
+data Ty = MkTy Bool [Symbol]
+\end{minted}
+
+O primeiro componente, \haskell|Bool|, é a anulabilidade \(\eta\), e o
+segundo, \haskell|[Symbol]|, é o conjunto cabeça \(F\), representado
+como uma lista de nomes de não-terminais (do tipo \haskell|Symbol| de
+\verb|GHC.TypeLits|). Dois seletores de família de tipos extraem os
+componentes:
+
+\begin{minted}{haskell}
+type family Nullable (t :: Ty) :: Bool where
+  Nullable ('MkTy n _) = n
+
+type family First (t :: Ty) :: [Symbol] where
+  First ('MkTy _ f) = f
+\end{minted}
+
+\subsection{Ambiente de tipagem}
+
+O ambiente de tipagem \(\Gamma\) mapeia cada nome de não-terminal ao
+seu tipo de PEG e ao tipo Haskell que a regra produz. No código, isso
+é representado como:
+
+\begin{minted}{haskell}
+data EnvEntry = EnvEntry Ty Type
+type Env = [(Symbol, EnvEntry)]
+\end{minted}
+
+O usuário declara o ambiente como uma lista de pares no nível de tipos.
+Por exemplo, para a gramática de expressões aritméticas:
+
+\begin{minted}{haskell}
+type ArithEnv =
+  '[ '("expr"  , 'EnvEntry ('MkTy 'False '["term","factor","number"]) Exp)
+   , '("term"  , 'EnvEntry ('MkTy 'False '["factor","number"])        Exp)
+   , '("factor", 'EnvEntry ('MkTy 'False '["number"])                 Exp)
+   , '("number", 'EnvEntry ('MkTy 'False '[])                         Exp)
+   ]
+\end{minted}
+
+Cada entrada declara o nome do não-terminal, seu tipo de PEG
+\((\eta, F)\), e o tipo Haskell que a regra produz (\haskell|Exp|, neste
+caso).
+
+\subsection{O GADT \texttt{PExp}}
+
+As expressões de parsing são representadas pelo GADT \haskell|PExp|,
+indexado pelo ambiente \haskell|env|, pelo tipo de PEG \haskell|ty| e
+pelo tipo Haskell do resultado \haskell|a|:
+
+\begin{minted}{haskell}
+data PExp (env :: Env) (ty :: Ty) (a :: Type) where
+  Pure    :: a -> PExp env ('MkTy 'True '[]) a
+  Term    :: Char -> PExp env ('MkTy 'False '[]) Char
+  AnyChar :: PExp env ('MkTy 'False '[]) Char
+  NT      :: (KnownSymbol s, KnownMember s env ...)
+          => Name s -> PExp env (NTTy s env) (ResOf (Lookup s env))
+  Seq     :: PExp env t1 (a -> b) -> PExp env t2 a
+          -> PExp env (SeqTy t1 t2) b
+  Choice  :: PExp env t1 a -> PExp env t2 a
+          -> PExp env (ChoiceTy t1 t2) a
+  Star    :: PExp env ('MkTy 'False f) a
+          -> PExp env ('MkTy 'True f) [a]
+  Not     :: PExp env ('MkTy n f) a -> PExp env ('MkTy 'True f) ()
+  Map     :: (a -> b) -> PExp env ty a -> PExp env ty b
+  Indent  :: Rel n -> PExp env ty a -> PExp env ty a
+  Position :: Rel n -> PExp env ty a -> PExp env ty a
+  Align   :: PExp env ty a -> PExp env ty a
+\end{minted}
+
+Cada construtor codifica a conclusão da regra de tipagem correspondente
+no seu tipo de retorno:
+
+\begin{itemize}
+  \item \haskell|Pure x| sempre tem sucesso sem consumir entrada
+    (\haskell|'True|) e nenhum não-terminal pode aparecer à esquerda
+    (\haskell|'[]|).
+  \item \haskell|Term c| consome exatamente um terminal
+    (\haskell|'False|).
+  \item \haskell|Star e| exige, em seu tipo, que \haskell|e| seja não
+    anulável (\haskell|'MkTy 'False f|): esta é a verificação estática
+    que impede laços infinitos na repetição.
+  \item \haskell|Seq ef ex| combina os tipos de PEG de \haskell|ef| e
+    \haskell|ex| via \haskell|SeqTy|, calculando a anulabilidade
+    conjunta e a união dos conjuntos cabeça.
+  \item \haskell|Choice e1 e2| combina via \haskell|ChoiceTy|,
+    calculando a disjunção das anulabilidades e a união dos conjuntos
+    cabeça.
+\end{itemize}
+
+Os três construtores finais (\haskell|Indent|, \haskell|Position|,
+\haskell|Align|) são a extensão para parsing sensível a indentação e
+serão discutidos na Seção~\ref{sec:peg-indent}.
+
+\subsection{Gramáticas e a condição de aciclicidade}
+
+Uma gramática completa é um valor do tipo:
+
+\begin{minted}{haskell}
+data Grammar (env :: Env) (startTy :: Ty) (startA :: Type) where
+  Grammar :: Acyclic env
+          => Rules env env
+          -> PExp env startTy startA
+          -> Grammar env startTy startA
+\end{minted}
+
+O construtor \haskell|Grammar| exige duas coisas:
+
+\begin{enumerate}
+  \item \textbf{Condição de ponto fixo}: o argumento \haskell|Rules env env|
+    é uma lista heterogênea que associa cada nome do ambiente ao corpo
+    de sua regra, tipado exatamente com o tipo de PEG e o tipo de
+    resultado declarados no ambiente. Isso garante que as declarações
+    sejam consistentes com as definições.
+
+  \item \textbf{Aciclicidade}: a restrição \haskell|Acyclic env| é uma
+    família de tipos que percorre o ambiente e verifica, para cada
+    não-terminal \(i\), que \(i \notin \Gamma(i).F\). Como \(F\) é
+    uma sobre-aproximação dos não-terminais que podem aparecer na
+    posição mais à esquerda, essa condição rejeita tanto recursão
+    direta à esquerda quanto recursão indireta. Gramáticas com recursão
+    à esquerda são rejeitadas em tempo de compilação com uma mensagem
+    de erro descritiva.
+\end{enumerate}
+
+\subsection{O interpretador}
+
+A função \haskell|parse| executa uma gramática em uma entrada:
+
+\begin{minted}{haskell}
+data Result a = OK a String String | Fail
+
+parse :: Grammar env ty a -> String -> Result a
+\end{minted}
+
+O resultado \haskell|OK v consumed rest| contém o valor produzido, a
+parte da entrada consumida e o restante. \haskell|Fail| indica que a
+expressão inicial não casou.
+
+Internamente, o interpretador mantém um estado \haskell|PState|
+composto pela entrada restante anotada com colunas, um conjunto de
+candidatos de indentação (representado como intervalo) e uma flag de
+alinhamento. A função \haskell|eval| percorre o GADT \haskell|PExp| de
+forma estrutural, sem precisar de \haskell|unsafeCoerce|, pois as
+testemunhas de pertinência \haskell|Member| permitem recuperar cada
+corpo de regra exatamente no tipo correto.
+
+\subsection{O quasi-quoter}
+
+Escrever gramáticas diretamente no GADT \haskell|PExp| é preciso mas
+verboso. O módulo \haskell|PEG.QQ| fornece dois quasi-quoters que
+permitem usar a sintaxe concreta de Ford com rótulos e ações semânticas:
+
+\begin{minted}{haskell}
+import PEG.QQ (pegExpr, pegRules)
+\end{minted}
+
+Com \haskell|[pegRules| ... |]|, as regras são escritas na forma
+\verb|nome <- expressão|, onde a expressão segue a sintaxe de Ford.
+\textbf{Rótulos} (\verb|x:e|) associam nomes aos valores produzidos
+pelos sub-parsers; \textbf{ações semânticas} \verb|{ expr }| constroem
+o resultado usando os rótulos como variáveis em escopo:
+
+\begin{minted}{haskell}
+[pegRules|
+  expr <- t:term ts:(o:[+-] u:term)* { foldl addOp t ts }
+  term <- f:factor fs:(o:[*/] g:factor)*
+            { foldl (\acc (op,r) -> addOp acc (op,r)) f fs }
+  factor <- n:number / '(' e:expr ')' / '-' f:factor { Neg f }
+  number <- ds:[0-9]+ { Lit (read ds :: Int) }
+|]
+\end{minted}
+
+A sequência sem rótulos produz \haskell|()|; com um único rótulo,
+produz o valor desse rótulo; com vários rótulos, produz a tupla.
+
+Com \haskell|[pegExpr| ... |]|, uma única expressão é compilada e
+pode ser usada como expressão inicial da gramática.
+
+\section{Sensibilidade a indentação}
+\label{sec:peg-indent}
+
+A extensão para parsing sensível a indentação é baseada no trabalho de
+Nestra (2017), que adiciona três operadores à sintaxe de PEGs sem
+alterar o tipo de PEG do operando:
+
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{lll}
+    \toprule
+    Operador & Sintaxe concreta & Descrição \\
+    \midrule
+    $e^\rho$  & \verb|e^R|  & Indentação: o bloco de $e$ tem baseline
+    em relação $\rho$ ao bloco externo \\
+    $e_\sigma$ & \verb|e_R| & Modo de token: terminais de $e$ devem
+    estar na relação $\sigma$ ao baseline \\
+    $|e|$     & \verb-|e|-  & Alinhamento: o primeiro terminal de $e$
+    deve estar exatamente no baseline \\
+    \bottomrule
+  \end{tabular}
+  \caption{Operadores de indentação de PEGs}
+\end{table}
+
+As relações \(R\) disponíveis são:
+
+\begin{itemize}
+  \item \verb|>| — estritamente mais indentado (\haskell|gtR|);
+  \item \verb|>=| — indentado ou alinhado (\haskell|geR|);
+  \item \verb|=| — mesmo baseline (\haskell|eqR|);
+  \item \verb|~| — sem restrição (\haskell|anyR|), usado para espaço
+    em branco;
+  \item \verb|+n| — indentado exatamente \(n\) colunas à direita.
+\end{itemize}
+
+Uma regra fundamental é que o espaço em branco deve ser consumido
+sob o modo \verb|~|, para não fixar o baseline indevidamente:
+
+\begin{minted}{haskell}
+ws <- [ \t\r\n]*_~
+\end{minted}
+
+O alinhamento deve envolver o item, não o espaço em branco que o
+precede: escreve-se \verb|ws |e||, nunca \verb-|ws e|-.
+
+\section{Exemplos}
+
+\subsection{Parser de expressões aritméticas}
+
+O módulo \haskell|PEG.Examples.Arith| implementa um parser de expressões
+que constrói uma árvore sintática abstrata. A AST é:
+
+\begin{minted}{haskell}
+data Exp
+  = Lit Int
+  | Neg Exp
+  | Add Exp Exp | Sub Exp Exp
+  | Mul Exp Exp | Div Exp Exp
+\end{minted}
+
+O ambiente de tipos declara quatro não-terminais, todos produzindo
+\haskell|Exp|, e especifica os conjuntos cabeça que satisfazem a
+condição de aciclicidade:
+
+\begin{minted}{haskell}
+type ArithEnv =
+  '[ '("expr"  , 'EnvEntry ('MkTy 'False '["term","factor","number"]) Exp)
+   , '("term"  , 'EnvEntry ('MkTy 'False '["factor","number"])        Exp)
+   , '("factor", 'EnvEntry ('MkTy 'False '["number"])                 Exp)
+   , '("number", 'EnvEntry ('MkTy 'False '[])                         Exp)
+   ]
+\end{minted}
+
+A gramática usa o quasi-quoter para escrever as regras de forma
+concisa. A associatividade à esquerda é expressa por repetição com
+\haskell|foldl|:
+
+\begin{minted}{haskell}
+arith :: Grammar ArithEnv _ Exp
+arith =
+  Grammar
+    [pegRules|
+       expr   <- t:term ts:(o:[+-] u:term)* { foldl addOp t ts }
+       term   <- f:factor fs:(o:[*/] g:factor)*
+                   { foldl (\acc (op,r) -> addOp acc (op,r)) f fs }
+       factor <- n:number
+               / '(' e:expr ')'
+               / '-' f:factor { Neg f }
+       number <- ds:[0-9]+ { Lit (read ds :: Int) }
+    |]
+    (nt @"expr")
+\end{minted}
+
+Para executar o parser:
+
+\begin{minted}{haskell}
+ghci> parse arith "1+2*3"
+OK (Add (Lit 1) (Mul (Lit 2) (Lit 3))) "1+2*3" ""
+
+ghci> parse arith "(1+2)*3"
+OK (Mul (Add (Lit 1) (Lit 2)) (Lit 3)) "(1+2)*3" ""
+
+ghci> parse arith "10-2-3"
+OK (Sub (Sub (Lit 10) (Lit 2)) (Lit 3)) "10-2-3" ""
+\end{minted}
+
+Note que \haskell|10-2-3| é associado à esquerda, como esperado: o
+\haskell|foldl| no quasi-quoter cuida disso.
+
+\subsection{Blocos ao estilo Haskell}
+
+O módulo \haskell|PEG.Examples.Layout| implementa um parser para
+expressões \haskell|do| com dois modos de layout: indentação (como em
+Haskell) e colchetes explícitos (como em Haskell com a extensão
+\emph{NoImplicitPrelude}).
+
+A AST é simples:
+
+\begin{minted}{haskell}
+data DoStmt = Atom String | Nested [DoStmt]
+\end{minted}
+
+O ambiente de tipos:
+
+\begin{minted}{haskell}
+type DoEnv =
+  '[ '("doexp" , 'EnvEntry ('MkTy 'False '[])                               [DoStmt])
+   , '("istmts", 'EnvEntry ('MkTy 'False '["ws","stmt","doexp","name"])     [DoStmt])
+   , '("stmts" , 'EnvEntry ('MkTy 'False '["ws"])                          [DoStmt])
+   , '("stmt"  , 'EnvEntry ('MkTy 'False '["doexp","name"])               DoStmt)
+   , '("name"  , 'EnvEntry ('MkTy 'False '[])                             String)
+   , '("ws"    , 'EnvEntry ('MkTy 'True  '[])                             ())
+   ]
+\end{minted}
+
+A gramática usa os três operadores de indentação:
+
+\begin{minted}{haskell}
+doExp :: Grammar DoEnv _ [DoStmt]
+doExp =
+  Grammar
+    [pegRules|
+       doexp  <- "do" b:(i:istmts / j:stmts)
+       istmts <- ss:(ws st:|s:stmt|)+^>
+       stmts  <- r:(ws '{' ws s:stmt ss:(ws ';' ws t:stmt)* ws '}' { s:ss })^~
+       stmt   <- d:doexp { Nested d } / n:name { Atom n }
+       name   <- cs:[a-z]+
+       ws     <- [ \t\r\n]*_~
+    |]
+    [pegExpr| ws d:doexp ws !. |]
+\end{minted}
+
+Na regra \texttt{istmts}, a expressão
+\texttt{(ws st:{\textbar}s:stmt{\textbar})+\^{}>}
+constrói uma lista de declarações alinhadas (\texttt{{\textbar}s:stmt{\textbar}})
+em um bloco estritamente mais indentado (\texttt{\^{}>}) do que o bloco externo.
+Na regra \texttt{stmts}, o grupo \texttt{\^{}\~{}} usa a relação irrestrita,
+que é o que os colchetes explícitos exigem.
+
+Para executar com opções de layout:
+
+\begin{minted}{haskell}
+ghci> parseWith layoutOpts doExp "do a\n   b\n   c\n"
+OK [Atom "a", Atom "b", Atom "c"] ...
+
+ghci> parseWith layoutOpts doExp "do { a; b; c }\n"
+OK [Atom "a", Atom "b", Atom "c"] ...
+
+ghci> parseWith layoutOpts doExp "do a\n   do x\n      y\n   b\n"
+OK [Atom "a", Nested [Atom "x", Atom "y"], Atom "b"] ...
+\end{minted}
+
+O parser aceita tanto o layout por indentação quanto os colchetes
+explícitos, e os dois modos podem ser aninhados arbitrariamente.
+
+\section{PEGs e GLCs: principais diferenças}
+
+As PEGs e as GLCs são formalismos distintos para descrever
+linguagens. As principais diferenças práticas são:
+
+\textbf{Ambiguidade.} Toda PEG é, por definição, não-ambígua: a
+escolha ordenada garante que exista no máximo um resultado para
+qualquer entrada. As GLCs podem ser ambíguas, e resolver ambiguidades
+muitas vezes exige reformular a gramática ou usar anotações de
+precedência externas (como os mecanismos
+  \verb|%left|/\verb|%right| do yacc/bison).
+
+  \textbf{Recursão à esquerda.} GLCs admitem recursão à esquerda
+  naturalmente; por exemplo, \(E \to E + T\) é uma produção válida e
+  útil. Parsers PEG descendentes não suportam recursão à esquerda
+  direta. A solução é reescrever usando repetição \((\cdot)^*\) ou
+  \haskell|foldl|.
+
+  \textbf{Poder expressivo.} PEGs reconhecem linguagens que as GLCs não
+  conseguem (por exemplo, \(\{a^n b^n c^n \mid n \geq 0\}\), usando
+  predicados) e há conjectura de que algumas linguagens livres de
+  contexto não podem ser descritas por PEGs, embora isso não esteja
+  formalmente provado.
+
+  \textbf{Sensibilidade a indentação.} A extensão de Nestra permite
+  que PEGs descrevam linguagens sensíveis a indentação, como Python e
+  Haskell, de forma declarativa, sem pré-processamento léxico.
+
+  \section{Conclusão}
+
+  Este capítulo apresentou as Parsing Expression Grammars como um
+  formalismo determinístico para especificar analisadores sintáticos.
+  Apresentamos uma implementação tipada em Haskell que usa GADTs e
+  famílias de tipos para verificar, em tempo de compilação, as
+  condições de boa-formação: anulabilidade não-trivial nos corpos de
+  repetição e aciclicidade do ambiente de tipagem.
+
+  Os quasi-quoters \haskell|pegRules| e \haskell|pegExpr| permitem
+  escrever gramáticas na sintaxe concreta de Ford com rótulos e ações
+  semânticas, sem abrir mão das garantias estáticas. A extensão para
+  indentação de Nestra adiciona três operadores (\texttt{\^{}},
+  \texttt{\_}, \texttt{|e|}) que permitem descrever linguagens
+  sensíveis a layout de forma puramente declarativa.

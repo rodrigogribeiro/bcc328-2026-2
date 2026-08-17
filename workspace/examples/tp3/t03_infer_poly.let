@@ -1,0 +1,21 @@
+-- Programa polimórfico: identity funciona para qualquer tipo
+let identity = fn[a] (x : a) : a {
+    return x;
+}
+
+let apply = fn[a, b] (f : a -> b, x : a) : b {
+    return f(x);
+}
+
+let double = fn (n : int) : int {
+    return n * 2;
+}
+
+let main = fn (args : array(string)) : unit {
+    let n := identity(42);
+    let s := identity("hello");
+    let d := apply(double, 3);
+    print(int_to_string(n));
+    print(s);
+    print(int_to_string(d));
+}

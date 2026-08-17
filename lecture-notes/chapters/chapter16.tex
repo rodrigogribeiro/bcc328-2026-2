@@ -1,0 +1,637 @@
+\chapter{Verificação de tipos}
+
+\section{Introdução}
+
+No capítulo anterior, definimos formalmente o que é um sistema de
+tipos e demonstramos as propriedades de corretude que ele oferece.
+Vimos que as regras de tipagem, escritas como sistemas de inferência,
+constituem uma especificação matemática precisa do que significa um
+programa estar bem tipado. Este capítulo trata de transformar essa
+especificação em código: o \textbf{verificador de tipos} (\emph{type checker}).
+
+A ideia central é que existe uma correspondência direta entre as
+regras de inferência e as equações de um programa funcional. Cada
+regra se torna um caso em uma função recursiva; as premissas da regra
+se tornam chamadas recursivas; e a conclusão é o resultado retornado.
+Essa tradução é tão sistemática que, em muitos casos, o verificador
+de tipos pode ser lido como uma transcrição quase literal das regras.
+
+Apresentamos verificadores de tipos para quatro linguagens em
+progressão crescente de complexidade: \emph{TExp}, \emph{TLine},
+\emph{TWhile} e \emph{TImp}. Os sistemas de tipos formais dessas
+linguagens foram apresentados no capítulo anterior; aqui focamos
+exclusivamente na tradução dessas regras para código Haskell.
+
+\section{Verificação de Tipos para TExp}
+
+\subsection{A Linguagem e o seu Sistema de Tipos}
+
+A linguagem TExp tem dois tipos, \(\mathbf{Bool}\) e
+\(\mathbf{Nat}\), e sete construções: \(\mathbf{true}\),
+\(\mathbf{false}\), \(\mathbf{if}\), \(\mathbf{0}\),
+\(\mathbf{succ}\), \(\mathbf{pred}\) e \(\mathbf{iszero}\). Em Haskell:
+
+\begin{minted}{haskell}
+data Ty   = TBool | TNat
+
+data Term
+  = TTrue  | TFalse
+  | TIf Term Term Term
+  | TZero
+  | TSucc Term | TPred Term | TIsZero Term
+\end{minted}
+
+O sistema de tipos é definido pela relação \(\vdash t : T\) através
+de sete regras de inferência. A verificação de tipos é o problema de,
+dado um termo \(t\), encontrar \(T\) tal que \(\vdash t : T\), ou
+reportar que nenhum tal \(T\) existe.
+
+\subsection{Da Regra à Equação}
+
+A tradução de cada regra de tipagem para uma equação Haskell segue um
+padrão uniforme. Consideremos a regra (T-If):
+
+\[
+  \frac{
+    \vdash t_1 : \mathbf{Bool} \quad
+    \vdash t_2 : T \quad
+    \vdash t_3 : T
+  }{
+    \vdash \mathbf{if}\ t_1\ \mathbf{then}\ t_2\ \mathbf{else}\ t_3 : T
+  } \quad\text{(T-If)}
+\]
+
+A conclusão nos diz que o padrão a combinar é
+\haskell{TIf t1 t2 t3}. As premissas indicam três
+verificações recursivas a realizar:
+
+\begin{enumerate}
+  \item Verificar que \(t_1\) tem tipo \(\mathbf{Bool}\): a condição
+    deve ser booleana;
+  \item Verificar que \(t_2\) tem algum tipo \(T\);
+  \item Verificar que \(t_3\) tem o \textbf{mesmo} tipo \(T\): os
+    ramos devem coincidir;
+  \item Retornar \(T\) como resultado.
+\end{enumerate}
+
+Em Haskell:
+
+\begin{minted}{haskell}
+tcTerm (TIf t1 t2 t3) = do
+    ty1 <- tcTerm t1
+    unless (ty1 == TBool) $
+        throwError "Type error in if: condition must have type Bool"
+    ty2 <- tcTerm t2
+    ty3 <- tcTerm t3
+    unless (ty2 == ty3) $
+        throwError "Type error in if: both branches must have the same type"
+    pure ty2
+\end{minted}
+
+A mônada \haskell{TcM = ExceptT String Identity}
+carrega a possibilidade de falha sem precisar de nenhum contexto
+externo, pois TExp não tem variáveis.
+
+\subsection{O Verificador Completo}
+
+As demais equações seguem o mesmo padrão: cada uma implementa
+diretamente a sua regra correspondente:
+
+\begin{minted}{haskell}
+type TcM a = ExceptT String Identity a
+
+tcTerm :: Term -> TcM Ty
+tcTerm TTrue  = pure TBool                          -- (T-True)
+tcTerm TFalse = pure TBool                          -- (T-False)
+tcTerm TZero  = pure TNat                           -- (T-Zero)
+
+tcTerm (TIf t1 t2 t3) = do                         -- (T-If)
+    ty1 <- tcTerm t1
+    unless (ty1 == TBool) $
+        throwError "Type error in if: condition must have type Bool"
+    ty2 <- tcTerm t2
+    ty3 <- tcTerm t3
+    unless (ty2 == ty3) $
+        throwError "Type error in if: both branches must have the same type"
+    pure ty2
+
+tcTerm (TSucc t1) = do                              -- (T-Succ)
+    ty <- tcTerm t1
+    unless (ty == TNat) $
+        throwError "Type error in succ: argument must have type Nat"
+    pure TNat
+
+tcTerm (TPred t1) = do                              -- (T-Pred)
+    ty <- tcTerm t1
+    unless (ty == TNat) $
+        throwError "Type error in pred: argument must have type Nat"
+    pure TNat
+
+tcTerm (TIsZero t1) = do                            -- (T-IsZero)
+    ty <- tcTerm t1
+    unless (ty == TNat) $
+        throwError "Type error in iszero: argument must have type Nat"
+    pure TBool
+\end{minted}
+
+A estrutura recursiva de \haskell{tcTerm} espelha a
+estrutura indutiva do sistema de tipos. O verificador de tipos é, em
+essência, a prova construtiva do lema de unicidade de tipos,
+executada como um programa.
+
+\section{Verificação de Tipos para TLine}
+
+\subsection{A Linguagem TLine}
+
+TLine é uma linguagem imperativa simples com declaração de variáveis
+tipadas, atribuição, leitura e impressão. A sua sintaxe abstrata é:
+
+\begin{minted}{haskell}
+data Ty   = TInt | TBool | TString
+
+data Stmt
+  = SDecl   Var Ty Exp   -- var x : T = e ;
+  | SAssign Var Exp      -- x := e ;
+  | SRead   Exp Var      -- read prompt x ;
+  | SPrint  Exp          -- print e ;
+
+data Exp
+  = EInt Int | EBool Bool | EString String
+  | EVar Var
+  | Exp :+: Exp | Exp :*: Exp | Exp :-: Exp | Exp :/: Exp
+  | Exp :<: Exp | Exp :=: Exp
+  | Not Exp
+\end{minted}
+
+\subsection{O Contexto de Tipos}
+
+A principal novidade em relação a TExp é a presença de
+\textbf{variáveis}. Para verificar o tipo de
+\haskell{EVar x}, é preciso saber o tipo declarado
+para \haskell{x}. Essa informação é mantida em um
+\textbf{contexto de tipos}:
+
+\[
+  \Gamma : \mathit{Var} \rightharpoonup \mathit{Ty}
+\]
+
+Em Haskell, o contexto é representado por um \haskell{Map}:
+
+\begin{minted}{haskell}
+type Ctx = Map Var Ty
+\end{minted}
+
+O verificador precisa tanto \textbf{consultar} o contexto (para
+variáveis) quanto \textbf{estendê-lo} (quando uma declaração é
+processada). A mônada combina estado e tratamento de erros:
+
+\begin{minted}{haskell}
+type TcM a = StateT Ctx (ExceptT String Identity) a
+\end{minted}
+
+O \haskell{StateT Ctx} transporta o contexto ao longo
+da verificação; o \haskell{ExceptT String} interrompe
+a verificação com uma mensagem de erro.
+
+\subsection{O Algoritmo de Verificação}
+
+O verificador implementa diretamente as regras. Para expressões:
+
+\begin{minted}{haskell}
+tcExp :: Exp -> TcM Ty
+tcExp (EInt _)    = pure TInt        -- (T-Int)
+tcExp (EBool _)   = pure TBool       -- (T-Bool)
+tcExp (EString _) = pure TString    -- (T-String)
+tcExp (EVar v)    = lookupVar v    -- (T-Var)
+tcExp (e1 :+: e2) = do             -- (T-ArithOp)
+    ty1 <- tcExp e1
+    ty2 <- tcExp e2
+    unless (ty1 == TInt) $ throwError "Type error"
+    unless (ty2 == TInt) $ throwError "Type error"
+    pure TInt
+tcExp (e1 :<: e2) = do                                -- (T-CmpOp)
+    ty1 <- tcExp e1
+    ty2 <- tcExp e2
+    unless (ty1 == TInt) $ throwError "Type error"
+    unless (ty2 == TInt) $ throwError "Type error"
+    pure TBool
+tcExp (Not e1) = do                                   -- (T-Not)
+    ty <- tcExp e1
+    unless (ty == TBool) $ throwError "Type error"
+    pure TBool
+\end{minted}
+
+As equações para \haskell{:*:},
+\haskell{:-:} e \haskell{:/:} são
+idênticas à de \haskell{:+:}; a de
+\haskell{:=:} é idêntica à de \haskell{:<:}.
+
+Para comandos, o contexto é atualizado com
+\haskell{modify} quando uma variável é declarada:
+
+\begin{minted}{haskell}
+tcStmt :: Stmt -> TcM ()
+tcStmt (SDecl v t e) = do                             -- (T-Decl)
+    t' <- tcExp e
+    unless (t == t') $ throwError "Type error"
+    addNewVar v t
+
+tcStmt (SAssign v e) = do                             -- (T-Assign)
+    t  <- lookupVar v
+    t' <- tcExp e
+    unless (t == t') $ throwError "Type error"
+
+tcStmt (SRead e v) = do                               -- (T-Read)
+    t <- tcExp e
+    unless (t == TString) $ throwError "Type error"
+    t' <- lookupVar v
+    unless (t' == TInt)   $ throwError "Type error"
+
+tcStmt (SPrint e) = tcExp e >> pure ()                -- (T-Print)
+\end{minted}
+
+O ponto de entrada processa os comandos sequencialmente e retorna o
+contexto final:
+
+\begin{minted}{haskell}
+typeCheck :: TLine -> Either String [(Var, Ty)]
+typeCheck p = either Left (Right . Map.toList) (runTcM (tcTLine p))
+
+tcTLine :: TLine -> TcM ()
+tcTLine (TLine ss) = mapM_ tcStmt ss
+
+runTcM :: TcM a -> Either String Ctx
+runTcM m = runIdentity (runExceptT (execStateT m Map.empty))
+\end{minted}
+
+A função \haskell{addNewVar} estende o contexto com o par \(x
+\mapsto T\), correspondendo à notação \(\Gamma[x \mapsto T]\) nas
+regras. \haskell{lookupVar} consulta o contexto e
+lança um erro se a variável não estiver definida, implementando a
+premissa \(x \in \mathrm{dom}(\Gamma)\).
+
+\section{Verificação de Tipos para TWhile}
+
+\subsection{Extensões à Linguagem}
+
+TWhile estende TLine com dois novos comandos:
+
+\begin{minted}{haskell}
+data Stmt
+  = SDecl   Var Ty Exp
+  | SAssign Var Exp
+  | SRead   Exp Var
+  | SPrint  Exp
+  | SIf     Exp Block Block
+  | SWhile  Exp Block
+
+type Block = [Stmt]
+\end{minted}
+
+\subsection{Escopo de Variáveis}
+
+A novidade mais importante de TWhile é que variáveis declaradas
+\textbf{dentro} de um bloco \haskell{if} ou
+\haskell{while} não devem ser visíveis fora dele.
+Este é o conceito de \textbf{escopo léxico}: cada bloco tem o seu
+próprio espaço de nomes local.
+
+A regra se traduz na seguinte exigência de implementação: ao entrar
+em um bloco, o contexto pode ser estendido pelas declarações
+internas; ao sair do bloco, o contexto deve ser restaurado ao estado
+anterior. Essa operação é implementada por
+\haskell{withLocalCtx}:
+
+\begin{minted}{haskell}
+withLocalCtx :: TcM a -> TcM a
+withLocalCtx m = do
+    ctx <- get     -- salva o contexto atual
+    r   <- m       -- verifica o bloco
+    put ctx        -- restaura o contexto original
+    pure r
+\end{minted}
+
+E \haskell{tcBlock} aplica essa operação a cada bloco
+de comandos:
+
+\begin{minted}{haskell}
+tcBlock :: [Stmt] -> TcM ()
+tcBlock ss = withLocalCtx (mapM_ tcStmt ss)
+\end{minted}
+
+\subsection{As Novas Equações do Verificador}
+
+\begin{minted}{haskell}
+tcStmt :: Stmt -> TcM ()
+-- ... equações idênticas as de TLine ...
+tcStmt (SIf e b1 b2) = do  -- (T-If)
+    t <- tcExp e
+    unless (t == TBool) $ throwError "Type error"
+    tcBlock b1
+    tcBlock b2
+
+tcStmt (SWhile e b) = do   -- (T-While)
+    t <- tcExp e
+    unless (t == TBool) $ throwError "Type error"
+    tcBlock b
+\end{minted}
+
+A correspondência com as regras é imediata:
+\haskell{tcExp e} verifica a premissa \(\Gamma \vdash
+e : \mathbf{Bool}\); as chamadas a \haskell{tcBlock}
+verificam os blocos; e como \haskell{withLocalCtx}
+restaura o contexto após cada bloco, o escopo léxico é automaticamente imposto.
+
+% ============================================================
+\section{Verificação de Tipos para TImp}
+% ============================================================
+
+TImp estende TWhile com declarações de funções e tipos registro. A
+sua verificação de tipos introduz dois novos ambientes globais
+(\(\Delta\) e \(\Phi\)) e um novo componente local (o tipo de retorno
+esperado da função corrente \(\rho_{\mathit{ret}}\)). A implementação
+encontra-se em \verb|TImp/Frontend/TypeCheck/TImpTypeCheck.hs|.
+
+% ------------------------------------------------------------
+\subsection{A Mônada de Verificação}
+% ------------------------------------------------------------
+
+TWhile usa \haskell{StateT Ctx (ExceptT String Identity)} para
+transportar o contexto de variáveis mutável. TImp precisa, adicionalmente,
+de ambientes \emph{imutáveis}: \(\Delta\), \(\Phi\) e
+\(\rho_{\mathit{ret}}\) nunca mudam dentro de um bloco. A estrutura
+natural para informação somente-leitura é \haskell{ReaderT}:
+
+\begin{minted}{haskell}
+data TcEnv = TcEnv
+  { recordEnv  :: Map Name [(Field, Ty)]  -- Delta
+  , funcEnv    :: Map Name ([Ty], RetTy)  -- Phi
+  , returnType :: Maybe RetTy             -- rho_ret
+  }
+
+type VarCtx = Map Var Ty
+
+type TcM a = ReaderT TcEnv
+               (StateT VarCtx
+                 (ExceptT String Identity)) a
+\end{minted}
+
+A pilha combina três camadas:
+
+\begin{itemize}
+  \item \haskell{ReaderT TcEnv}: ambientes globais imutáveis
+    (\(\Delta\), \(\Phi\)) e o tipo de retorno esperado; acessados com
+    \haskell{asks}.
+  \item \haskell{StateT VarCtx}: contexto de variáveis \(\Gamma\),
+    que cresce à medida que variáveis são declaradas; manipulado com
+    \haskell{get}/\haskell{modify}.
+  \item \haskell{ExceptT String}: erros de tipo, interrompidos com
+    \haskell{throwError}.
+\end{itemize}
+
+O ponto de entrada constrói \(\Delta\) e \(\Phi\) a partir das
+declarações antes de iniciar a verificação:
+
+\begin{minted}{haskell}
+typeCheck :: TImp -> Either String TcResult
+typeCheck (TImp decls stmts) = do
+  recEnv  <- buildRecordEnv decls      -- constroi Delta
+  funcEnv <- buildFuncEnv recEnv decls -- constroi Phi
+  let env = TcEnv recEnv funcEnv Nothing
+  mapM_ (tcFuncDecl env) [fd | DFunc fd <- decls]
+  finalCtx <- runTcM env (tcBlock stmts)
+  ...
+\end{minted}
+
+A construção separada de \(\Delta\) e \(\Phi\) garante que
+declarações de funções e registros sejam visíveis mutuamente:
+qualquer função pode referenciar qualquer tipo registro e qualquer
+outra função, independentemente da ordem de declaração.
+
+% ------------------------------------------------------------
+\subsection{Regras e Implementação: Registros}
+% ------------------------------------------------------------
+
+\subsubsection{Acesso a campo: regra (T-Field)}
+
+\[
+  \infer[\text{(T-Field)}]
+  {\Gamma;\Delta;\Phi \vdash e.f : \tau}
+  {\Gamma;\Delta;\Phi \vdash e : R \quad \Delta(R)(f) = \tau}
+\]
+
+\begin{minted}{haskell}
+tcExp (EField e f) = do
+  t <- tcExp e
+  case t of
+    TRecord rname -> lookupField rname f   -- Delta(R)(f)
+    _ -> throwError ("Field access on non-record type " ++ showTy t)
+\end{minted}
+
+\haskell{lookupField} consulta \(\Delta\) via
+\haskell{asks recordEnv} e lança um erro se o campo não existe.
+
+\subsubsection{Construção de registro: regra (T-New)}
+
+\[
+  \infer[\text{(T-New)}]
+  {\Gamma;\Delta;\Phi \vdash \mathbf{new}\;R\,\{\overline{f_i\!=\!e_i}\}: R}
+  {R \in \mathrm{dom}(\Delta)
+    \quad \Delta(R) = \overline{(f_i:\tau_i)}
+  \quad \Gamma;\Delta;\Phi \vdash e_i : \tau_i}
+\]
+
+\begin{minted}{haskell}
+tcExp (ENew rname fields) = do
+  renv <- asks recordEnv
+  case Map.lookup rname renv of
+    Nothing -> throwError ("Undefined record type: " ++ rname)
+    Just declFlds -> do
+      mapM_ (checkField declFlds) fields  -- verifica tipos dos campos
+      -- verifica que nenhum campo extra foi fornecido
+      let provided = map fst fields
+          declared = map fst declFlds
+      unless (all (`elem` declared) provided) $
+        throwError ("Unknown field in new " ++ rname)
+      unless (length provided == length declared) $
+        throwError ("Wrong number of fields in new " ++ rname)
+      pure (TRecord rname)
+\end{minted}
+
+\subsubsection{Atribuição de campo: regra (T-FieldAssign)}
+
+\[
+  \infer[\text{(T-FieldAssign)}]
+  {\Gamma;\Delta;\Phi \vdash x.f \mathbin{:=} e \dashv \Gamma}
+  {\Gamma(x) = R \quad \Delta(R)(f) = \tau
+  \quad \Gamma;\Delta;\Phi \vdash e : \tau}
+\]
+
+\begin{minted}{haskell}
+tcStmt (SFieldAssign v f e) = do
+  vTy <- lookupVar v
+  case vTy of
+    TRecord rname -> do
+      fieldTy <- lookupField rname f     -- Delta(R)(f)
+      t' <- tcExp e
+      unless (fieldTy == t') $
+        throwError ("Type error in field assignment " ++ v ++ "." ++ f)
+    _ -> throwError (v ++ " is not a record")
+\end{minted}
+
+% ------------------------------------------------------------
+\subsection{Regras e Implementação: Funções}
+% ------------------------------------------------------------
+
+\subsubsection{Chamada como expressão: regra (T-CallExpr)}
+
+\[
+  \infer[\text{(T-CallExpr)}]
+  {\Gamma;\Delta;\Phi \vdash f(e_1,\ldots,e_n) : \tau}
+  {\Phi(f) = ([\tau_1,\ldots,\tau_n],\;\tau)
+  \quad \Gamma;\Delta;\Phi \vdash e_i : \tau_i}
+\]
+
+\begin{minted}{haskell}
+tcExp (ECall fname args) = do
+  fenv <- asks funcEnv
+  case Map.lookup fname fenv of
+    Nothing -> throwError ("Undefined function: " ++ fname)
+    Just (pts, rt) -> do
+      argTys <- mapM tcExp args
+      unless (argTys == pts) $
+        throwError ("Argument type mismatch in call to " ++ fname)
+      case rt of
+        RTVoid  -> throwError ("Void function " ++ fname ++ " used as expression")
+        RTTy ty -> pure ty
+\end{minted}
+
+A verificação de que \(rt \neq \mathbf{void}\) implementa a distinção
+entre (T-CallExpr) e (T-CallStmt): uma função \texttt{void} não pode
+aparecer onde um valor é esperado.
+
+\subsubsection{Chamada como comando: regra (T-CallStmt)}
+
+\[
+  \infer[\text{(T-CallStmt)}]
+  {\Gamma;\Delta;\Phi \vdash f(e_1,\ldots,e_n) \dashv \Gamma}
+  {\Phi(f) = ([\tau_1,\ldots,\tau_n],\;\mathbf{void})
+  \quad \Gamma;\Delta;\Phi \vdash e_i : \tau_i}
+\]
+
+\begin{minted}{haskell}
+tcStmt (SCall fname args) = do
+  fenv <- asks funcEnv
+  case Map.lookup fname fenv of
+    Nothing -> throwError ("Undefined function: " ++ fname)
+    Just (pts, rt) -> do
+      unless (rt == RTVoid) $
+        throwError ("Non-void call used as statement: " ++ fname)
+      argTys <- mapM tcExp args
+      unless (argTys == pts) $
+        throwError ("Argument type mismatch in call to " ++ fname)
+\end{minted}
+
+\subsubsection{Retorno: regras (T-RetVal) e (T-RetVoid)}
+
+\[
+  \infer[\text{(T-RetVal)}]
+  {\ldots;\rho_{\mathit{ret}} \vdash \mathbf{return}\; e \dashv \Gamma}
+  {\rho_{\mathit{ret}} = \tau \quad \Gamma;\Delta;\Phi \vdash e : \tau}
+  \qquad
+  \infer[\text{(T-RetVoid)}]
+  {\ldots;\mathbf{void} \vdash \mathbf{return} \dashv \Gamma}
+  {}
+\]
+
+O tipo de retorno esperado é lido do ambiente via \haskell{asks
+returnType}. O valor \haskell{Nothing} indica que estamos fora de
+qualquer função; \haskell{return} fora de função é um erro:
+
+\begin{minted}{haskell}
+tcStmt (SReturn Nothing) = do
+  mrt <- asks returnType
+  case mrt of
+    Nothing       -> throwError "return outside a function"
+    Just RTVoid   -> pure ()
+    Just (RTTy t) -> throwError ("return with no value in function returning "
+                                  ++ showTy t)
+
+tcStmt (SReturn (Just e)) = do
+  mrt <- asks returnType
+  t'  <- tcExp e
+  case mrt of
+    Nothing       -> throwError "return outside a function"
+    Just RTVoid   -> throwError "return with value in void function"
+    Just (RTTy t) ->
+      unless (t == t') $
+        throwError ("return type mismatch: expected " ++ showTy t)
+\end{minted}
+
+\subsubsection{Declaração de função: regra (T-FuncDecl)}
+
+\[
+  \infer[\text{(T-FuncDecl)}]
+  {\Delta;\Phi \vdash \mathbf{fn}\; f(\overline{x_i:\tau_i}):\rho\;\{B\}
+  \;\checkmark}
+  {[x_1\!\mapsto\!\tau_1,\ldots,x_n\!\mapsto\!\tau_n];\Delta;\Phi;\rho
+  \vdash B \dashv \_}
+\]
+
+A função \haskell{tcFuncDecl} instala o contexto inicial com os
+parâmetros e ajusta \(\rho_{\mathit{ret}}\) no ambiente via
+\haskell{local}:
+
+\begin{minted}{haskell}
+tcFuncDecl :: TcEnv -> FuncDecl -> Either String ()
+tcFuncDecl baseEnv (FuncDecl name params retTy body) = do
+  let paramPairs = [(v, t) | Param v t <- params]
+      initCtx    = Map.fromList paramPairs
+      env        = baseEnv { returnType = Just retTy }
+  case runIdentity (runExceptT
+         (execStateT (runReaderT (tcBlock body) env) initCtx)) of
+    Left err -> Left ("In function " ++ name ++ ": " ++ err)
+    Right _  -> Right ()
+\end{minted}
+
+O contexto de variáveis é inicializado com os parâmetros formais
+(\(\Gamma_0 = [x_1\mapsto\tau_1,\ldots,x_n\mapsto\tau_n]\)) e o
+\haskell{returnType} é fixado a \haskell{Just retTy}. Como o ambiente
+é imutável e os parâmetros são carregados diretamente no estado
+inicial, variáveis externas à função são invisíveis dentro dela,
+implementando o escopo de função isolado exigido pela regra (T-FuncDecl).
+
+\section{Conclusão}
+
+Neste capítulo, mostramos que o verificador de tipos é uma
+transcrição quase literal do sistema de tipos, e que a
+correspondência entre regras e código é precisa e sistemática.
+
+Para TExp, a ausência de variáveis permite que o verificador seja uma
+função pura sem contexto externo. A mônada
+\haskell{ExceptT String Identity} é suficiente.
+
+Para TLine, a introdução de variáveis exige um contexto de tipos
+\(\Gamma\) mantido como estado da mônada. O verificador deve
+consultar o contexto para variáveis e estendê-lo para declarações, o
+que é naturalmente capturado por
+\haskell{StateT Ctx (ExceptT String Identity)}.
+
+Para TWhile, a adição de blocos com escopo local exige que o
+verificador salve e restaure o contexto ao redor de cada bloco. As
+regras (T-If) e (T-While) formalizam essa exigência ao manter o
+contexto de saída igual ao de entrada.
+
+Para TImp, funções e registros introduzem dois novos ambientes
+globais imutáveis (\(\Delta\) e \(\Phi\)) e um contexto de retorno
+por função (\(\rho_{\mathit{ret}}\)), todos naturalmente capturados
+por \haskell{ReaderT TcEnv}. O contexto de variáveis \(\Gamma\)
+permanece no \haskell{StateT}, crescendo com declarações e sendo
+restaurado ao sair de cada bloco ou função.
+
+O padrão que emerge é geral: a estrutura da mônada de verificação
+espelha a estrutura dos ambientes semânticos: informação imutável
+vai em \haskell{ReaderT}, informação mutável vai em
+\haskell{StateT}, e falhas vão em \haskell{ExceptT}. O sistema de
+tipos é a especificação; o verificador de tipos é a sua implementação
+direta.

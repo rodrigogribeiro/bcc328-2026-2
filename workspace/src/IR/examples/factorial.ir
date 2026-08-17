@@ -1,0 +1,25 @@
+-- Iterative factorial.
+--
+-- Control flow:
+--   acc := 1
+--   loop: if n <= 0 goto done else goto body
+--   body: acc := acc * n; n := n - 1; goto loop
+--   done: return acc
+
+func factorial(n) {
+  SEQ(MOVE(TEMP(acc), CONST(1)),
+  SEQ(LABEL(loop),
+  SEQ(CJUMP(BINOP(LEQ, TEMP(n), CONST(0)), done, body),
+  SEQ(LABEL(body),
+  SEQ(MOVE(TEMP(acc), BINOP(MUL, TEMP(acc), TEMP(n))),
+  SEQ(MOVE(TEMP(n), BINOP(SUB, TEMP(n), CONST(1))),
+  SEQ(JUMP(NAME(loop)),
+  SEQ(LABEL(done),
+      RETURN(TEMP(acc))))))))))
+}
+
+-- Entry point: compute 5! and print it.
+func main() {
+  SEQ(MOVE(TEMP(result), CALL(NAME(factorial), CONST(5))),
+      EXP(CALL(NAME(print), TEMP(result))))
+}

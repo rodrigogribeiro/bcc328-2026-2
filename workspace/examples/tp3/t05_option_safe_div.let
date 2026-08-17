@@ -1,0 +1,26 @@
+-- Option com divisão segura (sem anotações de tipo nas variáveis locais)
+type Option(a) = Some(a) | None
+
+let safe_div = fn (a : int, b : int) : Option(int) {
+    if b == 0 {
+        return None;
+    } else {
+        return Some(a / b);
+    }
+}
+
+let show_result = fn (r : Option(int)) : unit {
+    match r {
+        None    => print("erro: divisao por zero")
+        Some(v) => print(int_to_string(v))
+    }
+}
+
+let main = fn (args : array(string)) : unit {
+    let r1 := safe_div(10, 2);
+    let r2 := safe_div(7, 0);
+    let r3 := safe_div(100, 4);
+    show_result(r1);
+    show_result(r2);
+    show_result(r3);
+}
