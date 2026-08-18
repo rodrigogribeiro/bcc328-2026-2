@@ -1,129 +1,160 @@
-# BCC328 - Construção de Compiladores I
+# BCC328 — Construção de Compiladores I
 
-## Introdução
+Repositório com o código-fonte dos exemplos, slides e notas de aula da
+disciplina BCC328.
 
-Este repositório contém a configuração básica do ambiente de desenvolvimento
-para a disciplina BCC328 - Construção de compiladores I. Este ambiente provê as
-seguintes ferramentas:
+---
 
-- `cabal`: Gerenciamento de projetos e dependências Haskell.
+## Ferramentas disponíveis no ambiente
 
-- `alex`: Gerador de analisador léxico para Haskell.
+| Ferramenta | Versão | Uso |
+|---|---|---|
+| GHC | 9.6.7 | Compilador Haskell |
+| Cabal | 3.12 | Gerenciador de pacotes e build |
+| Alex | 3.5+ | Gerador de analisador léxico |
+| Happy | 2.1+ | Gerador de analisador sintático (LALR) |
+| RISC-V GCC | 11.4 | Cross-compilação para RISC-V 64 |
+| Wasmtime | 25+ | Runtime WebAssembly |
+| WABT | 1.0.34 | Ferramentas WebAssembly (wat2wasm, …) |
+| LaTeX | TL 2023 | Compilação de slides e notas |
 
-- `happy`: Gerador de analisador sintático para Haskell.
+---
 
-- `wabt`: Conjunto de ferramentas para desenvolvimento WebAssembly.
+## Configurando o ambiente
 
-## Acessando o ambiente
+Duas opções são suportadas: **Nix** (recomendado) ou **Docker Compose**.
 
-Para utilizar o ambiente, execute os seguintes comandos na mesma pasta que estão
-os arquivos `Dockerfile` e `docker-compose.yml`:
+---
 
-Na primeira execução do ambiente execute com a flag `--build` para criação da
-imagem.
+### Opção 1 — Nix
 
-```
-docker-compose up -d --build
-```
+**Pré-requisito:** Nix com suporte a flakes habilitado.
 
-```
-```
-
-Após a criação da imagem, você poderá inicializar o ambiente usando:
-
-```
-docker-compose up -d
-```
-
-Depois de inicializado, acesso o shell da imagem com o comando:
+Para habilitar flakes, adicione ao arquivo `~/.config/nix/nix.conf`:
 
 ```
-docker-compose exec haskell-dev bash
+experimental-features = nix-command flakes
 ```
+
+**Entrando no ambiente:**
+
+```bash
+# Na raiz do repositório
+nix develop
+```
+
+O comando acima baixa e configura automaticamente todas as ferramentas. Ao
+entrar no shell, você verá a mensagem de boas-vindas com as versões instaladas.
+
+Para compilar o projeto após entrar no shell:
+
+```bash
+cd workspace
+cabal build
+```
+
+---
+
+### Opção 2 — Docker Compose
+
+**Pré-requisitos:** Docker Engine e Docker Compose v2+.
+
+**Primeira execução** (constrói a imagem, pode demorar alguns minutos):
+
+```bash
+docker compose build
+```
+
+**Abrindo um shell de desenvolvimento:**
+
+```bash
+docker compose run --rm haskell-dev
+```
+
+Dentro do container, o código-fonte do workspace está em `/workspace`:
+
+```bash
+cd /workspace
+cabal build
+```
+
+---
 
 ## Estrutura do projeto
 
-Todo o código está definido dentro da pasta `src`. Vamos ver a estrutura das
-pastas:
-
-- Automata: Implementação de algoritmos para análise léxica. Utilizado nas aulas
-  para uma compreensão de como os geradores de analisadores léxicos são
-  implementados.
-
-- Exp: Implementação de um compilador de expressões. Essa implementação está
-  completa. Tem diferentes analisadores sintáticos e gerador de código WASM e
-  Risc-V.
-
-- Line: Implementação de um compilador de uma linguagem com atribuição, read e
-  print.
-
-- Markup: Implementação de um gerador de slides a partir de arquivos markdown,
-  utilizado nas primeiras aulas de Haskell, como uma revisão para a linguagem.
-
-- PEG: Implementação de uma biblioteca para Parsing Expression Grammars.
-
-- Parsing: Implementação de algoritmos de parsing (recursivo e outros algoritmos
-  baseados em tabela)
-
-- Utils: Utilidades usadas por demais pastas
-
-- While: Implementação de um compilador para uma linguagem imperativa simples.
-
-Muitas dessas pastas definem um executável que pode ser compilado e executado
-usando o cabal. Se você ver o arquivo `bcc328.cabal`, lá tem a especificação de
-vários executáveis. Por exemplo:
-
 ```
+.
+├── workspace/          Código-fonte Haskell dos exemplos do curso
+│   ├── src/
+│   │   ├── Automata/       Algoritmos de autômatos (análise léxica)
+│   │   ├── Exp/            Compilador de expressões → WASM e RISC-V
+│   │   ├── Line/           Linguagem com atribuição, read e print
+│   │   ├── While/          Linguagem imperativa simples
+│   │   ├── TExp/           Expressões com verificação de tipos
+│   │   ├── TLine/          Line com verificação de tipos
+│   │   ├── TWhile/         While com verificação de tipos
+│   │   ├── TImp/           Linguagem imperativa tipada (registros, funções)
+│   │   ├── Lambda/         Cálculo lambda (avaliação e redução)
+│   │   ├── MiniML/         Inferência de tipos (Hindley-Milner)
+│   │   ├── FJ/             Featherweight Java
+│   │   ├── IR/             Representação intermediária
+│   │   ├── ClosureConvert/ Conversão de closures
+│   │   ├── PEG/            Biblioteca de PEG parsing
+│   │   └── Parsing/        CYK, LL(1) e LR parsing
+│   └── test/           Testes automatizados (Tasty/HUnit)
+├── slides/             Slides em LaTeX Beamer (um diretório por capítulo)
+├── lecture-notes/      Notas de aula em LaTeX
+└── assignments/        Especificações dos trabalhos práticos
 ```
 
-executable exp -- Import common warning flags. import: common-opts
+---
 
-    -- .hs or .lhs file containing the Main module.
-    main-is:          Exp.hs
+## Executando os exemplos
 
-    -- Modules included in this executable, other than Main.
-    -- other-modules:
+Todos os executáveis são compilados com `cabal build` e executados com
+`cabal run <nome>`. Passe `--help` para ver as opções de cada um.
 
-    -- LANGUAGE extensions used by modules in this package.
-    -- other-extensions:
-
-    -- Other library packages from which modules are imported.
-    build-depends:
-        base ^>=4.18.3.0,
-        bcc328
-
-    -- Directories containing source files.
-    hs-source-dirs:   src/Exp
-
-    -- Base language which the package is written in.
-    default-language: Haskell2010
-
-```
+```bash
+cabal run exp      # Compilador de expressões (WASM + RISC-V)
+cabal run line     # Compilador da linguagem Line
+cabal run twhile   # Compilador While tipado
+cabal run texp     # Compilador de expressões tipadas
+cabal run tline    # Compilador Line tipado
+cabal run timp     # Compilador TImp (registros e funções)
+cabal run lambda   # Interpretador de cálculo lambda
+cabal run mini-ml  # Inferência de tipos Mini ML
+cabal run fj       # Interpretador Featherweight Java
+cabal run ir       # Gerador de representação intermediária
 ```
 
-Mostra como é definido o executável do compilador de expressões. Você pode
-executar esse exemplo usando o comando
+Para executar os testes:
 
-```
-```
-
-cabal run exp
-
-```
+```bash
+cabal test
 ```
 
-que vai apresentar as diferentes opções de linha de comando para esse
-executável.
+---
 
-## Slides
+## Compilando slides e notas de aula
 
-A disciplina utiliza slides escritos utilizando markdown e a biblioteca
-reveal.js. Para gerar um pdf destes slides, sugiro a utilização do pandoc, um
-conversor entre diferentes formatos textuais. Tendo o pandoc instalado em sua
-máquina e um compilador de LaTeX, o comando:
+Os slides de cada capítulo ficam em `slides/chapterNN/slides.tex`.
+Para compilar um deck individualmente (dentro do ambiente Nix ou Docker):
 
-```
-pandoc slide.md -t beamer -o slide.pdf
+```bash
+cd slides/chapter09
+pdflatex -shell-escape slides.tex
 ```
 
-irá gerar o slide pdf para o arquivo `slide.md`.
+Para compilar todos os 28 decks de uma vez:
+
+```bash
+cd slides
+bash compile-all.sh
+```
+
+As notas de aula ficam em `lecture-notes/`. Para compilar:
+
+```bash
+cd lecture-notes
+latexmk -shell-escape -pdf main.tex
+```

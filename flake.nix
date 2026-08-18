@@ -77,6 +77,11 @@
                                                     titlesec
                                                     newunicodechar
                                                     latexmk
+                                                    beamer
+                                                    beamertheme-metropolis pgfopts appendixnumberbeamer
+                                                    adjustbox collectbox
+                                                    mathpartir
+                                                    fontawesome5
                                                     ;
                                                 })
 

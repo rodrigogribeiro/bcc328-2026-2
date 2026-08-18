@@ -186,9 +186,9 @@ promovido:
 data Ty = MkTy Bool [Symbol]
 \end{minted}
 
-O primeiro componente, \haskell|Bool|, é a anulabilidade \(\eta\), e o
-segundo, \haskell|[Symbol]|, é o conjunto cabeça \(F\), representado
-como uma lista de nomes de não-terminais (do tipo \haskell|Symbol| de
+O primeiro componente, \haskell{Bool}, é a anulabilidade \(\eta\), e o
+segundo, \haskell{[Symbol]}, é o conjunto cabeça \(F\), representado
+como uma lista de nomes de não-terminais (do tipo \haskell{Symbol} de
 \verb|GHC.TypeLits|). Dois seletores de família de tipos extraem os
 componentes:
 
@@ -224,14 +224,14 @@ type ArithEnv =
 \end{minted}
 
 Cada entrada declara o nome do não-terminal, seu tipo de PEG
-\((\eta, F)\), e o tipo Haskell que a regra produz (\haskell|Exp|, neste
+\((\eta, F)\), e o tipo Haskell que a regra produz (\haskell{Exp}, neste
 caso).
 
 \subsection{O GADT \texttt{PExp}}
 
-As expressões de parsing são representadas pelo GADT \haskell|PExp|,
-indexado pelo ambiente \haskell|env|, pelo tipo de PEG \haskell|ty| e
-pelo tipo Haskell do resultado \haskell|a|:
+As expressões de parsing são representadas pelo GADT \haskell{PExp},
+indexado pelo ambiente \haskell{env}, pelo tipo de PEG \haskell{ty} e
+pelo tipo Haskell do resultado \haskell{a}:
 
 \begin{minted}{haskell}
 data PExp (env :: Env) (ty :: Ty) (a :: Type) where
@@ -257,24 +257,24 @@ Cada construtor codifica a conclusão da regra de tipagem correspondente
 no seu tipo de retorno:
 
 \begin{itemize}
-  \item \haskell|Pure x| sempre tem sucesso sem consumir entrada
-    (\haskell|'True|) e nenhum não-terminal pode aparecer à esquerda
-    (\haskell|'[]|).
-  \item \haskell|Term c| consome exatamente um terminal
-    (\haskell|'False|).
-  \item \haskell|Star e| exige, em seu tipo, que \haskell|e| seja não
-    anulável (\haskell|'MkTy 'False f|): esta é a verificação estática
+  \item \haskell{Pure x} sempre tem sucesso sem consumir entrada
+    (\haskell{'True}) e nenhum não-terminal pode aparecer à esquerda
+    (\haskell{'[]}).
+  \item \haskell{Term c} consome exatamente um terminal
+    (\haskell{'False}).
+  \item \haskell{Star e} exige, em seu tipo, que \haskell{e} seja não
+    anulável (\haskell{'MkTy 'False f}): esta é a verificação estática
     que impede laços infinitos na repetição.
-  \item \haskell|Seq ef ex| combina os tipos de PEG de \haskell|ef| e
-    \haskell|ex| via \haskell|SeqTy|, calculando a anulabilidade
+  \item \haskell{Seq ef ex} combina os tipos de PEG de \haskell{ef} e
+    \haskell{ex} via \haskell{SeqTy}, calculando a anulabilidade
     conjunta e a união dos conjuntos cabeça.
-  \item \haskell|Choice e1 e2| combina via \haskell|ChoiceTy|,
+  \item \haskell{Choice e1 e2} combina via \haskell{ChoiceTy},
     calculando a disjunção das anulabilidades e a união dos conjuntos
     cabeça.
 \end{itemize}
 
-Os três construtores finais (\haskell|Indent|, \haskell|Position|,
-\haskell|Align|) são a extensão para parsing sensível a indentação e
+Os três construtores finais (\haskell{Indent}, \haskell{Position},
+\haskell{Align}) são a extensão para parsing sensível a indentação e
 serão discutidos na Seção~\ref{sec:peg-indent}.
 
 \subsection{Gramáticas e a condição de aciclicidade}
@@ -289,16 +289,16 @@ data Grammar (env :: Env) (startTy :: Ty) (startA :: Type) where
           -> Grammar env startTy startA
 \end{minted}
 
-O construtor \haskell|Grammar| exige duas coisas:
+O construtor \haskell{Grammar} exige duas coisas:
 
 \begin{enumerate}
-  \item \textbf{Condição de ponto fixo}: o argumento \haskell|Rules env env|
+  \item \textbf{Condição de ponto fixo}: o argumento \haskell{Rules env env}
     é uma lista heterogênea que associa cada nome do ambiente ao corpo
     de sua regra, tipado exatamente com o tipo de PEG e o tipo de
     resultado declarados no ambiente. Isso garante que as declarações
     sejam consistentes com as definições.
 
-  \item \textbf{Aciclicidade}: a restrição \haskell|Acyclic env| é uma
+  \item \textbf{Aciclicidade}: a restrição \haskell{Acyclic env} é uma
     família de tipos que percorre o ambiente e verifica, para cada
     não-terminal \(i\), que \(i \notin \Gamma(i).F\). Como \(F\) é
     uma sobre-aproximação dos não-terminais que podem aparecer na
@@ -310,7 +310,7 @@ O construtor \haskell|Grammar| exige duas coisas:
 
 \subsection{O interpretador}
 
-A função \haskell|parse| executa uma gramática em uma entrada:
+A função \haskell{parse} executa uma gramática em uma entrada:
 
 \begin{minted}{haskell}
 data Result a = OK a String String | Fail
@@ -318,29 +318,29 @@ data Result a = OK a String String | Fail
 parse :: Grammar env ty a -> String -> Result a
 \end{minted}
 
-O resultado \haskell|OK v consumed rest| contém o valor produzido, a
-parte da entrada consumida e o restante. \haskell|Fail| indica que a
+O resultado \haskell{OK v consumed rest} contém o valor produzido, a
+parte da entrada consumida e o restante. \haskell{Fail} indica que a
 expressão inicial não casou.
 
-Internamente, o interpretador mantém um estado \haskell|PState|
+Internamente, o interpretador mantém um estado \haskell{PState}
 composto pela entrada restante anotada com colunas, um conjunto de
 candidatos de indentação (representado como intervalo) e uma flag de
-alinhamento. A função \haskell|eval| percorre o GADT \haskell|PExp| de
-forma estrutural, sem precisar de \haskell|unsafeCoerce|, pois as
-testemunhas de pertinência \haskell|Member| permitem recuperar cada
+alinhamento. A função \haskell{eval} percorre o GADT \haskell{PExp} de
+forma estrutural, sem precisar de \haskell{unsafeCoerce}, pois as
+testemunhas de pertinência \haskell{Member} permitem recuperar cada
 corpo de regra exatamente no tipo correto.
 
 \subsection{O quasi-quoter}
 
-Escrever gramáticas diretamente no GADT \haskell|PExp| é preciso mas
-verboso. O módulo \haskell|PEG.QQ| fornece dois quasi-quoters que
+Escrever gramáticas diretamente no GADT \haskell{PExp} é preciso mas
+verboso. O módulo \haskell{PEG.QQ} fornece dois quasi-quoters que
 permitem usar a sintaxe concreta de Ford com rótulos e ações semânticas:
 
 \begin{minted}{haskell}
 import PEG.QQ (pegExpr, pegRules)
 \end{minted}
 
-Com \haskell|[pegRules| ... |]|, as regras são escritas na forma
+Com \haskell{[pegRules| ... |]}, as regras são escritas na forma
 \verb|nome <- expressão|, onde a expressão segue a sintaxe de Ford.
 \textbf{Rótulos} (\verb|x:e|) associam nomes aos valores produzidos
 pelos sub-parsers; \textbf{ações semânticas} \verb|{ expr }| constroem
@@ -356,10 +356,10 @@ o resultado usando os rótulos como variáveis em escopo:
 |]
 \end{minted}
 
-A sequência sem rótulos produz \haskell|()|; com um único rótulo,
+A sequência sem rótulos produz \haskell{()}; com um único rótulo,
 produz o valor desse rótulo; com vários rótulos, produz a tupla.
 
-Com \haskell|[pegExpr| ... |]|, uma única expressão é compilada e
+Com \haskell{[pegExpr| ... |]}, uma única expressão é compilada e
 pode ser usada como expressão inicial da gramática.
 
 \section{Sensibilidade a indentação}
@@ -389,12 +389,12 @@ alterar o tipo de PEG do operando:
 As relações \(R\) disponíveis são:
 
 \begin{itemize}
-  \item \verb|>| — estritamente mais indentado (\haskell|gtR|);
-  \item \verb|>=| — indentado ou alinhado (\haskell|geR|);
-  \item \verb|=| — mesmo baseline (\haskell|eqR|);
-  \item \verb|~| — sem restrição (\haskell|anyR|), usado para espaço
+  \item \verb|>|: estritamente mais indentado (\haskell{gtR});
+  \item \verb|>=|: indentado ou alinhado (\haskell{geR});
+  \item \verb|=|: mesmo baseline (\haskell{eqR});
+  \item \verb|~|: sem restrição (\haskell{anyR}), usado para espaço
     em branco;
-  \item \verb|+n| — indentado exatamente \(n\) colunas à direita.
+  \item \verb|+n|: indentado exatamente \(n\) colunas à direita.
 \end{itemize}
 
 Uma regra fundamental é que o espaço em branco deve ser consumido
@@ -411,7 +411,7 @@ precede: escreve-se \verb|ws |e||, nunca \verb-|ws e|-.
 
 \subsection{Parser de expressões aritméticas}
 
-O módulo \haskell|PEG.Examples.Arith| implementa um parser de expressões
+O módulo \haskell{PEG.Examples.Arith} implementa um parser de expressões
 que constrói uma árvore sintática abstrata. A AST é:
 
 \begin{minted}{haskell}
@@ -423,7 +423,7 @@ data Exp
 \end{minted}
 
 O ambiente de tipos declara quatro não-terminais, todos produzindo
-\haskell|Exp|, e especifica os conjuntos cabeça que satisfazem a
+\haskell{Exp}, e especifica os conjuntos cabeça que satisfazem a
 condição de aciclicidade:
 
 \begin{minted}{haskell}
@@ -437,7 +437,7 @@ type ArithEnv =
 
 A gramática usa o quasi-quoter para escrever as regras de forma
 concisa. A associatividade à esquerda é expressa por repetição com
-\haskell|foldl|:
+\haskell{foldl}:
 
 \begin{minted}{haskell}
 arith :: Grammar ArithEnv _ Exp
@@ -468,17 +468,17 @@ ghci> parse arith "10-2-3"
 OK (Sub (Sub (Lit 10) (Lit 2)) (Lit 3)) "10-2-3" ""
 \end{minted}
 
-Note que \haskell|10-2-3| é associado à esquerda, como esperado: o
-\haskell|foldl| no quasi-quoter cuida disso.
+Note que \haskell{10-2-3} é associado à esquerda, como esperado: o
+\haskell{foldl} no quasi-quoter cuida disso.
 
 \subsection{Blocos ao estilo Haskell}
 
-O módulo \haskell|PEG.Examples.Layout| implementa um parser para
-expressões \haskell|do| com dois modos de layout: indentação (como em
+O módulo \haskell{PEG.Examples.Layout} implementa um parser para
+expressões \haskell{do} com dois modos de layout: indentação (como em
 Haskell) e colchetes explícitos (como em Haskell com a extensão
 \emph{NoImplicitPrelude}).
 
-A AST é simples:
+A AST é simples
 
 \begin{minted}{haskell}
 data DoStmt = Atom String | Nested [DoStmt]
@@ -488,12 +488,12 @@ O ambiente de tipos:
 
 \begin{minted}{haskell}
 type DoEnv =
-  '[ '("doexp" , 'EnvEntry ('MkTy 'False '[])                               [DoStmt])
-   , '("istmts", 'EnvEntry ('MkTy 'False '["ws","stmt","doexp","name"])     [DoStmt])
-   , '("stmts" , 'EnvEntry ('MkTy 'False '["ws"])                          [DoStmt])
-   , '("stmt"  , 'EnvEntry ('MkTy 'False '["doexp","name"])               DoStmt)
-   , '("name"  , 'EnvEntry ('MkTy 'False '[])                             String)
-   , '("ws"    , 'EnvEntry ('MkTy 'True  '[])                             ())
+  '[ '("doexp" , 'EnvEntry ('MkTy 'False '[]) [DoStmt])
+   , '("istmts", 'EnvEntry ('MkTy 'False '["ws","stmt","doexp","name"]) [DoStmt])
+   , '("stmts" , 'EnvEntry ('MkTy 'False '["ws"]) [DoStmt])
+   , '("stmt"  , 'EnvEntry ('MkTy 'False '["doexp","name"]) DoStmt)
+   , '("name"  , 'EnvEntry ('MkTy 'False '[]) String)
+   , '("ws"    , 'EnvEntry ('MkTy 'True  '[]) ())
    ]
 \end{minted}
 
@@ -574,7 +574,7 @@ precedência externas (como os mecanismos
   condições de boa-formação: anulabilidade não-trivial nos corpos de
   repetição e aciclicidade do ambiente de tipagem.
 
-  Os quasi-quoters \haskell|pegRules| e \haskell|pegExpr| permitem
+  Os quasi-quoters \haskell{pegRules} e \haskell{pegExpr} permitem
   escrever gramáticas na sintaxe concreta de Ford com rótulos e ações
   semânticas, sem abrir mão das garantias estáticas. A extensão para
   indentação de Nestra adiciona três operadores (\texttt{\^{}},

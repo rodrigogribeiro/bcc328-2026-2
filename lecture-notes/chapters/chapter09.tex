@@ -38,7 +38,7 @@ Toda GLC pode ser convertida para uma gramática equivalente em FNC. O processo 
 \begin{enumerate}
   \item \textbf{Novo símbolo inicial.} Acrescente $S_0 \to S$ e torne $S_0$ o novo símbolo inicial. Isso evita que $S$ apareça no lado direito de alguma produção.
 
-  \item \textbf{Eliminação de produções vazias.} Para cada não-terminal nulável $A$ (tal que $A \Rightarrow^* \lambda$), em toda produção que contenha $A$ no lado direito, acrescente uma cópia da produção sem essa ocorrência de $A$. Depois remova $A \to \lambda$ (exceto $S_0 \to \lambda$ se $\lambda \in L(G)$).
+  \item \textbf{Eliminação de produções anulável.} Para cada não-terminal anulável $A$ (tal que $A \Rightarrow^* \lambda$), em toda produção que contenha $A$ no lado direito, acrescente uma cópia da produção sem essa ocorrência de $A$. Depois remova $A \to \lambda$ (exceto $S_0 \to \lambda$ se $\lambda \in L(G)$).
 
   \item \textbf{Eliminação de produções unitárias.} Para cada produção $A \to B$ onde $B$ é um único não-terminal, adicione $A \to \gamma$ para cada produção $B \to \gamma$ e remova $A \to B$.
 
@@ -52,23 +52,22 @@ Considere a gramática para $\{a^n b^n \mid n \geq 1\}$:
   S \to a\,S\,b \mid a\,b
 \]
 
-\textbf{Passo 1 — novo símbolo inicial:}
+\textbf{Passo 1: novo símbolo inicial:}
 \[
   S_0 \to S, \quad S \to a\,S\,b \mid a\,b
 \]
 
-\textbf{Passo 4 — binarização e terminalização} ($S \to a\,S\,b$ tem comprimento 3 com terminais mistos):
+\textbf{Passo 2: eliminar produções anuláveis:} nenhum não-terminal é anulável; a gramática não se altera.
+
+\textbf{Passo 3: eliminar produções unitárias:} $S_0 \to S$ é a única produção unitária. Copia-se cada produção de $S$ para $S_0$ e remove-se $S_0 \to S$:
 \[
   \begin{array}{lcl}
-    S_0 & \to & S \\
-    S   & \to & N_a\,A_1 \mid N_a\,N_b \\
-    A_1 & \to & S\,N_b \\
-    N_a & \to & a \\
-    N_b & \to & b
+    S_0 & \to & a\,S\,b \mid a\,b \\
+    S   & \to & a\,S\,b \mid a\,b
   \end{array}
 \]
 
-\textbf{Passo 3 — eliminar unitária} ($S_0 \to S$): copiar as produções de $S$ para $S_0$:
+\textbf{Passo 4: binarização e terminalização:} $S_0 \to a\,S\,b$ e $S \to a\,S\,b$ têm comprimento 3 com terminais mistos; $S_0 \to a\,b$ e $S \to a\,b$ têm comprimento 2 com terminais. Introduzem-se $N_a \to a$, $N_b \to b$ e o auxiliar $A_1$:
 \[
   \begin{array}{lcl}
     S_0 & \to & N_a\,A_1 \mid N_a\,N_b \\
@@ -148,65 +147,129 @@ Usamos a gramática em FNC do exemplo anterior (sem $S_0$) e analisamos $w = \te
   \end{array}
 \]
 
-\textbf{Passo base} (subcadeias de comprimento 1):
+A tabela $T$ tem $\binom{n+1}{2} = 10$ entradas, dispostas no triângulo superior.
+As linhas correspondem ao índice de início $i$ e as colunas ao índice de fim $j$; cada célula $T[i][j]$ armazena o conjunto de não-terminais que derivam a subcadeia $a_i \cdots a_j$.
+O preenchimento avança diagonal por diagonal, do comprimento 1 ao comprimento 4.
 
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}cccc@{}}
-  \toprule
-  $i$ & $j$ & $a_i$ & $T[i][j]$ \\
-  \midrule
-  1 & 1 & a & $\{N_a\}$ \\
-  2 & 2 & a & $\{N_a\}$ \\
-  3 & 3 & b & $\{N_b\}$ \\
-  4 & 4 & b & $\{N_b\}$ \\
-  \bottomrule
-\end{tabular}
-\end{table}
+\bigskip
+\noindent\textbf{Passo 1 — comprimento $\ell = 1$ (diagonal principal):}
 
-\textbf{Comprimento 2:}
+Cada célula $T[i][i]$ recebe os não-terminais com produção unitária $A \to a_i$:
+\[
+T[1][1] = \{N_a\},\quad T[2][2] = \{N_a\},\quad T[3][3] = \{N_b\},\quad T[4][4] = \{N_b\}.
+\]
 
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}cccl@{}}
-  \toprule
-  $i$ & $j$ & Subcadeia & $T[i][j]$ \\
-  \midrule
-  1 & 2 & \texttt{aa} & $k{=}1$: $\{N_a\}$ e $\{N_a\}$ — nenhuma produção $X \to N_a\,N_a$ — $\emptyset$ \\
-  2 & 3 & \texttt{ab} & $k{=}2$: $\{N_a\}$ e $\{N_b\}$ — $S \to N_a\,N_b$ — $\{S\}$ \\
-  3 & 4 & \texttt{bb} & $k{=}3$: $\{N_b\}$ e $\{N_b\}$ — nenhuma produção $X \to N_b\,N_b$ — $\emptyset$ \\
-  \bottomrule
-\end{tabular}
-\end{table}
+\[
+\begin{array}{c|cccc}
+         & \underbrace{a}_{1} & \underbrace{a}_{2} & \underbrace{b}_{3} & \underbrace{b}_{4} \\[4pt]
+\hline
+i{=}1 & \{N_a\}  & \cdot     & \cdot     & \cdot \\[2pt]
+i{=}2 &          & \{N_a\}   & \cdot     & \cdot \\[2pt]
+i{=}3 &          &           & \{N_b\}   & \cdot \\[2pt]
+i{=}4 &          &           &           & \{N_b\}
+\end{array}
+\]
 
-\textbf{Comprimento 3:}
+\bigskip
+\noindent\textbf{Passo 2 — comprimento $\ell = 2$:}
 
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}cccl@{}}
-  \toprule
-  $i$ & $j$ & Subcadeia & $T[i][j]$ \\
-  \midrule
-  1 & 3 & \texttt{aab} & $k{=}1$: $\{N_a\}$ e $\emptyset$ — vazio; $k{=}2$: $\emptyset$ e $\{N_b\}$ — vazio — $\emptyset$ \\
-  2 & 4 & \texttt{abb} & $k{=}2$: $\{N_a\}$ e $\emptyset$ — vazio; $k{=}3$: $\{S\}$ e $\{N_b\}$ — $A_1 \to S\,N_b$ — $\{A_1\}$ \\
-  \bottomrule
-\end{tabular}
-\end{table}
+Para cada par $(i,j)$ com $j - i = 1$ existe exatamente um ponto de divisão $k = i$:
 
-\textbf{Comprimento 4} (cadeia completa):
+\begin{itemize}
+  \item $T[1][2]$ — subcadeia \texttt{aa}:\\
+        $k{=}1$: $T[1][1] = \{N_a\}$,\; $T[2][2] = \{N_a\}$.
+        Nenhuma produção tem a forma $X \to N_a\,N_a$.
+        $\Rightarrow T[1][2] = \emptyset$.
 
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}cccl@{}}
-  \toprule
-  $i$ & $j$ & Subcadeia & $T[i][j]$ \\
-  \midrule
-  1 & 4 & \texttt{aabb} & $k{=}1$: $\{N_a\}$ e $\{A_1\}$ — $S \to N_a\,A_1$ — $\{S\}$ \\
-  \bottomrule
-\end{tabular}
-\end{table}
+  \item $T[2][3]$ — subcadeia \texttt{ab}:\\
+        $k{=}2$: $T[2][2] = \{N_a\}$,\; $T[3][3] = \{N_b\}$.
+        $S \to N_a\,N_b$ existe.
+        $\Rightarrow T[2][3] = \{S\}$.
 
-Como $S \in T[1][4]$, a cadeia \texttt{aabb} é aceita. A figura abaixo mostra a árvore de derivação correspondente:
+  \item $T[3][4]$ — subcadeia \texttt{bb}:\\
+        $k{=}3$: $T[3][3] = \{N_b\}$,\; $T[4][4] = \{N_b\}$.
+        Nenhuma produção tem a forma $X \to N_b\,N_b$.
+        $\Rightarrow T[3][4] = \emptyset$.
+\end{itemize}
+
+\[
+\begin{array}{c|cccc}
+         & 1        & 2        & 3        & 4 \\
+\hline
+i{=}1 & \{N_a\}  & \emptyset & \cdot    & \cdot \\[2pt]
+i{=}2 &          & \{N_a\}   & \{S\}    & \cdot \\[2pt]
+i{=}3 &          &           & \{N_b\}  & \emptyset \\[2pt]
+i{=}4 &          &           &          & \{N_b\}
+\end{array}
+\]
+
+\bigskip
+\noindent\textbf{Passo 3 — comprimento $\ell = 3$:}
+
+Para cada par $(i,j)$ com $j - i = 2$ há dois pontos de divisão:
+
+\begin{itemize}
+  \item $T[1][3]$ — subcadeia \texttt{aab}:
+    \begin{itemize}
+      \item $k{=}1$: $T[1][1] = \{N_a\}$,\; $T[2][3] = \{S\}$.
+            Nenhuma produção tem a forma $X \to N_a\,S$.
+      \item $k{=}2$: $T[1][2] = \emptyset$,\; $T[3][3] = \{N_b\}$.
+            Primeiro conjunto vazio; nenhuma produção aplicável.
+    \end{itemize}
+    $\Rightarrow T[1][3] = \emptyset$.
+
+  \item $T[2][4]$ — subcadeia \texttt{abb}:
+    \begin{itemize}
+      \item $k{=}2$: $T[2][2] = \{N_a\}$,\; $T[3][4] = \emptyset$.
+            Segundo conjunto vazio; nenhuma produção aplicável.
+      \item $k{=}3$: $T[2][3] = \{S\}$,\; $T[4][4] = \{N_b\}$.
+            $A_1 \to S\,N_b$ existe.
+    \end{itemize}
+    $\Rightarrow T[2][4] = \{A_1\}$.
+\end{itemize}
+
+\[
+\begin{array}{c|cccc}
+         & 1        & 2        & 3        & 4 \\
+\hline
+i{=}1 & \{N_a\}  & \emptyset & \emptyset & \cdot \\[2pt]
+i{=}2 &          & \{N_a\}   & \{S\}     & \{A_1\} \\[2pt]
+i{=}3 &          &           & \{N_b\}   & \emptyset \\[2pt]
+i{=}4 &          &           &           & \{N_b\}
+\end{array}
+\]
+
+\bigskip
+\noindent\textbf{Passo 4 — comprimento $\ell = 4$ (cadeia completa):}
+
+Para $T[1][4]$ (subcadeia \texttt{aabb}) há três pontos de divisão:
+
+\begin{itemize}
+  \item $k{=}1$: $T[1][1] = \{N_a\}$,\; $T[2][4] = \{A_1\}$.
+        $S \to N_a\,A_1$ existe. $S$ é adicionado.
+  \item $k{=}2$: $T[1][2] = \emptyset$,\; $T[3][4] = \emptyset$.
+        Ambos os conjuntos vazios; nada aplicável.
+  \item $k{=}3$: $T[1][3] = \emptyset$,\; $T[4][4] = \{N_b\}$.
+        Primeiro conjunto vazio; nada aplicável.
+\end{itemize}
+
+$\Rightarrow T[1][4] = \{S\}$.
+
+\medskip
+\noindent\textbf{Matriz completa:}
+
+\[
+\begin{array}{c|cccc}
+         & 1        & 2        & 3        & 4 \\
+\hline
+i{=}1 & \{N_a\}  & \emptyset & \emptyset & \{S\} \\[2pt]
+i{=}2 &          & \{N_a\}   & \{S\}     & \{A_1\} \\[2pt]
+i{=}3 &          &           & \{N_b\}   & \emptyset \\[2pt]
+i{=}4 &          &           &           & \{N_b\}
+\end{array}
+\]
+
+Como $S \in T[1][4]$, a cadeia \texttt{aabb} é aceita. A sequência de derivação correspondente é:
 
 \[
   S \;\Rightarrow\; N_a\,A_1 \;\Rightarrow\; a\,A_1 \;\Rightarrow\; a\,S\,N_b \;\Rightarrow\; a\,N_a\,N_b\,N_b \;\Rightarrow\; a\,a\,b\,b
