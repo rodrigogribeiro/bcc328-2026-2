@@ -206,6 +206,6 @@ interpLinear prog stmts labelIdx pc =
 -- Run the interpreter for a single function, returning either a runtime
 --   error or the function's result.
 runFunc :: ProgMap -> MachineState -> Stmt -> IO (Either String FuncResult)
-runFunc prog state body = do
-  (result, _) <- runStateT (runExceptT (interpFunc prog body)) state
+runFunc prog state' body = do
+  (result, _) <- runStateT (runExceptT (interpFunc prog body)) state'
   return result
