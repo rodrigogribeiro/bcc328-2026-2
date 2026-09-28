@@ -17,8 +17,7 @@ opTable
   infixL op sym = InfixL $ op <$ symbol sym
 
 termP :: Parser Exp
-termP = parens expP
-    <|> EInt <$> int
+termP = parens expP <|> EInt <$> int
 
 expP :: Parser Exp
 expP = makeExprParser termP opTable

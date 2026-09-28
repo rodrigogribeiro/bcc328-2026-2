@@ -66,9 +66,10 @@ item = Parser (\ ts ->
                    (c:cs) -> [(c,cs)])
 
 sat :: (t -> Bool) -> Parser t t
-sat p = do
-          t <- item
-          if p t then return t else mzero
+sat p = Parser (\ ts ->
+            case ts of
+              [] -> []
+              (c:cs) -> if p c then [(c,cs)] else [])
 
 -- parsing a single symbol
 
@@ -94,6 +95,9 @@ option p v = p <|> succeed v
 
 -- recursion parsers
 
+-- many :: Parser a -> Parser [a]
+-- many p = ((:) <$> p <*> many p) <|> succeed []
+
 many1    :: Parser s a -> Parser s [a]
 many1 p  =  list <$> p <*> many p
 
@@ -104,7 +108,7 @@ pack p r q  =  pi32 <$> p <*> r <*> q
 
 -- parsing a list with a separator
 
-listOf      :: Parser s a -> Parser s b -> Parser s [a]
+listOf :: Parser s a -> Parser s b -> Parser s [a]
 listOf p s  =  list <$> p <*> many (pi22 <$> s <*> p)
 
 -- auxiliary functions
@@ -115,13 +119,15 @@ determ p = Parser (\ ts ->
                        []    -> []
                        (x:_) -> [x] )
 
-
 greedy, greedy1  ::  Parser s b -> Parser s [b]
 greedy   =  determ . many
 greedy1  =  determ . many1
 
 list :: a -> [a] -> [a]
 list x xs  =  x:xs
+
+pi21 :: a -> b -> a
+pi21 x _ = x
 
 pi22 :: a -> b -> b
 pi22 _ y    =  y
@@ -132,18 +138,37 @@ pi32 _ y _  =  y
 -- Applications of EBNF combinators
 
 natural  :: Parser Char Int
-natural  =  foldl (\a b -> a*10 + b) 0 <$> many1 digit
+natural
+  = go <$> many1 digit
+    where
+      go = foldl (\ a b -> a * 10 + b) 0
+
+-- foldl _ v [] = v
+-- foldl f v (x : xs) = foldl (f v x) xs
+
+-- foldl (\ a b -> a * 10 + b) 0 [1,2,3] ==
+-- foldl (\ a b -> a * 10 + b) 1 [2,3] ==
+-- foldl (\ a b -> a * 10 + b) 12 [3] ==
+-- foldl (\ a b -> a * 10 + b) 123 [] ==
+-- 123
 
 integer  ::  Parser Char Int
-integer  =  (const negate <$> (symbol '-')) `option` id  <*>  natural
+integer
+  = go `option` id  <*>  natural
+    where
+       go = const negate <$> symbol '-'
 
 identifier :: Parser Char String
-identifier =  list <$> sat isAlpha <*> greedy (sat isAlphaNum)
+identifier
+  = list <$> alpha <*> alphaNum
+    where
+      alpha = sat isLetter
+      alphaNum = greedy (sat isAlphaNum)
 
 parens :: Parser Char a -> Parser Char a
 parens p  =  pack (symbol '(') p (symbol ')')
 
-commaList    :: Parser Char a -> Parser Char [a]
+commaList :: Parser Char a -> Parser Char [a]
 commaList p  =  listOf p (symbol ',')
 
 spaces :: Parser Char String
@@ -156,6 +181,16 @@ chainr pe po  =  h <$> many (j <$> pe <*> po) <*> pe
   where j x op  =  (x `op`)
         h fs x  =  foldr ($) x fs
 
+-- foldr _ v [] = v
+-- foldr f v (x:xs) = f x (foldr f v xs)
+-- f $ x = f x
+
+-- foldr ($) 4 [1+,2+,3+] =
+-- 1 + (foldr ($) 4 [2+, 3+]) =
+-- 1 + (2 + (foldr ($) 4 [3+])) =
+-- 1 + (2 + (3 + (foldr ($) 4 []))) =
+-- 1 + (2 + (3 + 4))
+
 chainl  ::  Parser s a -> Parser s (a -> a -> a) -> Parser s a
 chainl pe po  =  h <$> pe <*> many (j <$> po <*> pe)
   where j op x  =  (`op` x)
@@ -164,16 +199,16 @@ chainl pe po  =  h <$> pe <*> many (j <$> po <*> pe)
 
 -- Combinators for repetition
 
-psequence         :: [Parser s a] -> Parser s [a]
-psequence []      =  succeed []
-psequence (p:ps)  =  list <$> p <*> psequence ps
+psequence :: [Parser s a] -> Parser s [a]
+psequence [] =  succeed []
+psequence (p:ps) = list <$> p <*> psequence ps
 
-psequence'  :: [Parser s a] -> Parser s [a]
-psequence'  =  foldr f (succeed [])
+psequence' :: [Parser s a] -> Parser s [a]
+psequence' =  foldr f (succeed [])
   where  f p q = list <$> p <*> q
 
-choice  :: [Parser s a] -> Parser s a
-choice  =  foldr (<|>) mzero
+choice :: [Parser s a] -> Parser s a
+choice = foldr (<|>) mzero
 
 -- End by combinator
 

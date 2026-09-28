@@ -29,8 +29,7 @@ exprLexer s
 
 
 lexer' :: Parser Char [Token]
-lexer' = (\_ x -> x) <$> spaces 
-                        <*> many ((\x _ -> x) <$> tokenLexer <*> spaces)
+lexer' = pi22 <$> spaces <*> many (pi21 <$> tokenLexer <*> spaces)
 
 -- tokens
 
@@ -45,7 +44,11 @@ data Token
 
 
 tokenLexer :: Parser Char Token
-tokenLexer = (Id <$> identifier) <|> number <|> tokenlex
+tokenLexer
+  = choice [ Id <$> identifier
+           , number
+           , tokenlex
+           ]
 
 number :: Parser Char Token
 number = Number <$> natural
@@ -53,8 +56,11 @@ number = Number <$> natural
 -- a table for the lexical analyser
 
 table :: [(Char, Token)]
-table = [('+', Add), ('*', Mult),
-         ('(', LParen), (')', RParen)]
+table = [ ('+', Add)
+        , ('*', Mult)
+        , ('(', LParen)
+        , (')', RParen)
+        ]
 
 tokenlex :: Parser Char Token
 tokenlex = choice $ map (\(c,t) -> const t <$> symbol c) table
@@ -93,7 +99,7 @@ varParser = f <$> sat isVar
     isVar _      = False
     f (Id v) = Var v
     f _ = error "impossible!"
- 
+
 numParser :: Parser Token Expr
 numParser = f <$> sat isNum
   where

@@ -71,6 +71,7 @@ common common-opts
     , syb
     , algebraic-graphs
     , template-haskell >= 2.20
+    , typed-peg >= 0.3
 
   build-tool-depends: happy:happy, alex:alex
 
@@ -178,17 +179,7 @@ library
       MiniML.Frontend.TypeInference.SolverMonad
       MiniML.Backend.Lambda.Erase
       MiniML.Mono.Mono
-      -- Parsing expression grammars
-      PEG
-      PEG.Type
-      PEG.TyLevel
-      PEG.Member
-      PEG.Indent
-      PEG.Syntax
-      PEG.Grammar
-      PEG.Parse
-      PEG.QQ
-      PEG.QQ.HsExp
+      -- Parsing expression grammars (examples; core from typed-peg on Hackage)
       PEG.Examples.Arith
       PEG.Examples.Layout
       -- Parsing algorithms

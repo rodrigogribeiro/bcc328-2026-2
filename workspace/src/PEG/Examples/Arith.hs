@@ -1,20 +1,16 @@
-{-# LANGUAGE DataKinds             #-}
-{-# LANGUAGE QuasiQuotes           #-}
-{-# LANGUAGE TypeApplications      #-}
-{-# LANGUAGE TypeOperators         #-}
-{-# LANGUAGE PartialTypeSignatures #-}
-{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
-
+{-# LANGUAGE DataKinds       #-}
+{-# LANGUAGE GADTs           #-}
+{-# LANGUAGE KindSignatures  #-}
+{-# LANGUAGE QuasiQuotes     #-}
+{-# LANGUAGE TemplateHaskell #-}
 module PEG.Examples.Arith
   ( Exp (..)
   , evalExp
   , showExp
-  , ArithEnv
   , arith
   ) where
 
-import PEG
-import PEG.QQ (pegRules)
+import PEG.QQ (pegGrammar)
 
 data Exp
   = Lit Int
@@ -51,23 +47,17 @@ addOp l ('*', r) = Mul l r
 addOp l ('/', r) = Div l r
 addOp _ (c  , _) = error ("addOp: unexpected operator " ++ show c)
 
-type ArithEnv =
-  '[ '("expr"  , 'EnvEntry ('MkTy 'False '["term", "factor", "number"]) Exp)
-   , '("term"  , 'EnvEntry ('MkTy 'False '["factor", "number"])         Exp)
-   , '("factor", 'EnvEntry ('MkTy 'False '["number"])                   Exp)
-   , '("number", 'EnvEntry ('MkTy 'False '[])                           Exp)
-   ]
+[pegGrammar|
+  %name   arith
+  %stream String
+  %start  expr
 
-arith :: Grammar ArithEnv _ Exp
-arith =
-  Grammar
-    [pegRules|
-       expr   <- t:term ts:(o:[+-] u:term)* { foldl addOp t ts }
-       term   <- f:factor fs:(o:[*/] g:factor)*
-                   { foldl (\acc (op, r) -> addOp acc (op, r)) f fs }
-       factor <- n:number
-               / '(' e:expr ')'
-               / '-' f:factor { Neg f }
-       number <- ds:[0-9]+ { Lit (read ds :: Int) }
-    |]
-    (nt @"expr")
+  expr   :: Exp <- t:term ts:(o:[+-] u:term { (o, u) })*
+                     { foldl addOp t ts }
+  term   :: Exp <- f:factor fs:(o:[*/] g:factor { (o, g) })*
+                     { foldl addOp f fs }
+  factor :: Exp <- n:number { n }
+                 / '(' e:expr ')' { e }
+                 / '-' f:factor { Neg f }
+  number :: Exp <- ds:[0-9]+ { Lit (read ds :: Int) }
+|]
